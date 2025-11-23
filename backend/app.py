@@ -16,15 +16,13 @@ from utils.file_analyzer import FileAnalyzer
 from next_steps_graph import run_next_steps_graph
 
 import requests
-# from werkzeug.serving import WSGIRequestHandler
-# WSGIRequestHandler.timeout = 120
-
-
+from werkzeug.serving import WSGIRequestHandler
+WSGIRequestHandler.timeout = 120
 
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 UPLOAD_FOLDER = os.getenv("UPLOAD_DIR", "./uploaded_documents")
 MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", 50)) * 1024 * 1024
@@ -121,7 +119,6 @@ def chat():
         retrieved_data = query_documents(collection, user_query, n_results=10)
 
         # Let response_generator build the full RAG answer
-                # Let response_generator build the full RAG answer
         response_data = generate_detailed_response(user_query, retrieved_data)
 
         return (
@@ -141,7 +138,6 @@ def chat():
             ),
             200,
         )
-
 
     except Exception as e:
         print(f"Error in chat endpoint: {e}")
@@ -367,44 +363,72 @@ def ai_status():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# -------------------------------------------------------------
-# NEXT STEPS ENDPOINT (LangGraph-like reasoning)
-# -------------------------------------------------------------
-from flask import request, jsonify
-# from agents.email_agent import send_email_via_agent
 
+# -----------------------------------------------------------------------
+# NEXT STEPS ENDPOINT (Rule-based suggester)
+# -----------------------------------------------------------------------
 @app.route("/api/next-steps", methods=["POST"])
-def next_steps_endpoint():
-    try:
-        data = request.json or {}
-        user_question = data.get("user_question", "")
-        answer_text = data.get("answer_text", "")
-        key_points = data.get("key_points", [])
+def api_next_steps():
+    """
+    Accepts:
+      {
+        "user_question": "...",
+        "answer_text": "...",
+        "key_points": [...]
+      }
 
-        # ---- LangGraph call ----
-        suggestions = run_next_steps_graph(
-            question=user_question,
-            answer=answer_text,
-            key_points=key_points
+    Returns:
+      {
+        "suggestions": [ {label, category, reason}, ... ],
+        "error": null | str
+      }
+    """
+    try:
+        data = request.get_json(force=True) or {}
+
+        user_question = (data.get("user_question") or "").strip()
+        answer_text = (data.get("answer_text") or "").strip()
+        key_points = data.get("key_points") or []
+
+        if not user_question or not answer_text:
+            return jsonify(
+                {
+                    "error": "user_question and answer_text are required",
+                    "suggestions": [],
+                }
+            ), 400
+
+        result = run_next_steps_graph(
+            user_question=user_question,
+            answer_text=answer_text,
+            key_points=key_points,
         )
 
-        # ---- Add email-category suggestion ----
-        suggestions.append({
-            "label": "Email this answer",
-            "reason": "Send the generated answer to yourself via email.",
-            "category": "email"
-        })
-
-        return jsonify({"suggestions": suggestions}), 200
+        return jsonify(result), 200
 
     except Exception as e:
-        print("🔥 Next Steps Error:", e)
-        return jsonify({"suggestions": [], "error": str(e)}), 200
+        print("[/api/next-steps ERROR]", e)
+        return jsonify({"error": str(e), "suggestions": []}), 500
 
-# -----------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------
+# CORS preflight handler
+# -----------------------------------------------------------------------
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+        return response, 200
+
+
+# -----------------------------------------------------------------------
 # Main
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    # Use 127.0.0.1 to match your curl & frontend config
+    print(f"Starting Finance Chatbot Backend on port {port}...")
+    print(f"API available at: http://127.0.0.1:{port}")
     app.run(host="127.0.0.1", port=port, debug=False, use_reloader=False)
