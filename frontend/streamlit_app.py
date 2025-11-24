@@ -1,5 +1,5 @@
 # ============================================================================
-# frontend/streamlit_app.py
+# frontend/streamlit_app.py - WITH AUTHENTICATION
 # ============================================================================
 
 import os
@@ -27,22 +27,30 @@ from components.upload import upload_interface
 from components.file_analysis import file_analysis_interface, show_ai_status
 from utils.api_client import get_document_count, check_backend, API_URL
 
+# 🔐 Import authentication system
+from components.auth import (
+    check_authentication,
+    user_profile_sidebar,
+    is_admin,
+    is_student,
+    admin_user_management
+)
+
 
 # ============================================================================
-# SECTION 1: Custom CSS (from document)
+# SECTION 1: Custom CSS (Enhanced version from document)
 # ============================================================================
 
+# [PASTE YOUR ENHANCED CSS HERE - The complete CSS from the artifact above]
 st.markdown(
     """
 <style>
-    /* ============================================================================
-   ENHANCED STREAMLIT CSS - Beautiful Fonts & Backgrounds
-   ============================================================================ */
+    /* [PASTE THE COMPLETE ENHANCED CSS HERE] */
+    /* For brevity, I'm showing placeholder - use the full CSS from previous artifact */
 
 /* ==================== FONT IMPORTS ==================== */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Poppins:wght@400;500;600;700&display=swap');
 
-/* ==================== ROOT VARIABLES ==================== */
 :root {
     --font-primary: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --font-heading: 'Poppins', sans-serif;
@@ -111,7 +119,7 @@ h1, h2, h3, h4, h5, h6,
 h1, .header-title {
     font-size: 2.75rem;
     font-weight: 800;
-    background: linear-gradient(135deg, #ffffff 0%, #f0f0f0 100%);
+    background: linear-gradient(135deg, #ff6f00 0%, #f0f0f0 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -333,7 +341,7 @@ h4 {
     left: 50%;
     transform: translateX(-50%);
     width: 100%;
-    max-width: 900px;
+    /* max-width: 900px; */
     padding: 0.4rem 1rem 0.85rem 1rem;
     background: transparent;
     z-index: 1000;
@@ -829,36 +837,81 @@ def initialize_session_state():
 
     if "model_mode" not in st.session_state:
         st.session_state.model_mode = "best"
+    
+    # 🔐 Authentication states
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    
+    if "user" not in st.session_state:
+        st.session_state.user = None
 
 
 initialize_session_state()
 
-# ============================================================================
-# SECTION 3: Sidebar
-# ============================================================================
-
-render_sidebar()
 
 # ============================================================================
-# SECTION 4: Header
+# SECTION 3: Authentication Check
 # ============================================================================
+
+# 🔐 Check if user is authenticated - if not, show login page
+check_authentication()
+
+
+# ============================================================================
+# SECTION 4: Sidebar (with User Profile)
+# ============================================================================
+
+# Show user profile in sidebar
+user_profile_sidebar()
+
+# Show sidebar based on role
+if is_admin():
+    # Admin sees full sidebar
+    render_sidebar()
+else:
+    # Students see limited sidebar (only theme)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ⚙️ Settings")
+    
+    theme_option = st.sidebar.selectbox(
+        "🎨 Theme",
+        ["Light", "Dark", "Auto"],
+        index=0,
+        key="student_theme"
+    )
+    st.session_state.sidebar_theme = theme_option
+    
+    st.sidebar.info("🎓 **Student Mode** - Limited access")
+
+
+# ============================================================================
+# SECTION 5: Header
+# ============================================================================
+
+# Welcome message with user name
+user_name = st.session_state.user.get("name", "User")
+role_badge = "👑 Admin" if is_admin() else "🎓 Student"
 
 st.markdown(
-    """
+    f"""
 <div class="header-container">
     <h1 class="header-title">💼 Finance Chatbot</h1>
     <p class="header-subtitle">Intelligent Document Analysis & Q&A System</p>
+    <p style="margin-top: 1rem; font-size: 1rem; opacity: 0.9;">
+        Welcome back, <strong>{user_name}</strong> | {role_badge}
+    </p>
 </div>
 """,
     unsafe_allow_html=True,
 )
 
+
 # ============================================================================
-# SECTION 5: API Status Display
+# SECTION 6: API Status Display (Admin Only)
 # ============================================================================
 
 def get_api_status():
-    """Get detailed API status information - WITHOUT exposing API keys"""
+    """Get detailed API status information"""
     backend_status = {}
     try:
         resp = requests.get(f"{API_URL}/api/status", timeout=5)
@@ -903,11 +956,12 @@ def get_api_status():
     }
 
 
-# Display API Status
-st.markdown(
+# Only show API status for admins
+if is_admin():
+    st.markdown(
     """
 <div class="api-status-header">
-    <h3 class="api-status-title">📌 API & Service Status</h3>
+        <h3 class="api-status-title">🔌 API & Service Status</h3>
 </div>
 """,
     unsafe_allow_html=True,
@@ -929,6 +983,7 @@ with col4:
     st.metric(label="Documents", value=api_status["documents"])
 
 st.markdown("---")
+
 
 # ============================================================================
 # SECTION 6: Backend Connection Check
@@ -960,36 +1015,38 @@ print("[Startup] ✓ Backend connection verified")
 # SECTION 7: Main Content - Tabs
 # ============================================================================
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["💬 Chat", "📤 Upload", "🔍 Analyze Files", "📊 Statistics"]
-)
+if is_admin():
+    # 👑 ADMIN VIEW - Full Access
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["💬 Chat", "📤 Upload", "🔍 Analyze Files", "📊 Statistics", "👥 Users"]
+    )
 
-# TAB 1: CHAT
-with tab1:
-    st.subheader("💬 Chat with Your Documents")
-    chat_interface()
+    # TAB 1: CHAT
+    with tab1:
+        st.subheader("💬 Chat with Your Documents")
+        chat_interface()
 
-# TAB 2: UPLOAD
-with tab2:
-    st.subheader("📤 Upload & Process Documents")
-    upload_interface()
+    # TAB 2: UPLOAD
+    with tab2:
+        st.subheader("📤 Upload & Process Documents")
+        upload_interface()
 
-# TAB 3: ANALYZE FILES
-with tab3:
-    st.subheader("🔍 AI-Powered File Analysis")
-    file_analysis_interface()
+    # TAB 3: ANALYZE FILES
+    with tab3:
+        st.subheader("🔍 AI-Powered File Analysis")
+        file_analysis_interface()
 
-# TAB 4: STATISTICS
-with tab4:
-    st.subheader("📊 System Statistics & Analytics")
+    # TAB 4: STATISTICS
+    with tab4:
+        st.subheader("📊 System Statistics & Analytics")
 
-    st.markdown("### 🤖 AI Services Status")
-    show_ai_status()
+        st.markdown("### 🤖 AI Services Status")
+        show_ai_status()
 
-    st.markdown("---")
-    st.markdown("### 📈 Performance Metrics")
+        st.markdown("---")
+        st.markdown("### 📈 Performance Metrics")
 
-    col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric(label="Total Documents", value=get_document_count())
@@ -1018,7 +1075,7 @@ with tab4:
 
     with col2:
         st.info(
-            f"**📄 Auto-Refresh:** "
+                f"**🔄 Auto-Refresh:** "
             f"{'✅ Enabled' if st.session_state.sidebar_auto_refresh else '❌ Disabled'}"
         )
 
@@ -1028,11 +1085,65 @@ with tab4:
             f"{'✅ Enabled' if st.session_state.sidebar_show_advanced else '❌ Disabled'}"
         )
 
-    st.markdown("---")
-    st.markdown("### 💬 Chat History")
+    # TAB 5: USER MANAGEMENT
+    with tab5:
+        st.subheader("👥 User Management")
+        admin_user_management()
 
-    if st.session_state.messages:
-        st.success(f"✅ Total messages: **{len(st.session_state.messages)}**")
+else:
+    # 🎓 STUDENT VIEW - Limited Access (Chat + Theme Only)
+    st.info("🎓 **Student Mode** - You have access to chat functionality and theme settings")
+    
+    tab1, tab2 = st.tabs(["💬 Chat", "ℹ️ Info"])
+
+    # TAB 1: CHAT
+    with tab1:
+        st.subheader("💬 Chat with Documents")
+        chat_interface()
+
+    # TAB 2: INFO
+    with tab2:
+        st.subheader("ℹ️ Information")
+        
+        st.markdown("""
+        ### 🎓 Welcome to Finance Chatbot Student Portal
+        
+        As a student, you have access to:
+        
+        ✅ **Chat Interface** - Ask questions about uploaded documents
+        ✅ **Theme Settings** - Customize your viewing experience
+        
+        #### 📝 How to Use:
+        
+        1. **Navigate to the Chat tab**
+        2. **Type your question** in the chat input at the bottom
+        3. **Press Enter** to get AI-powered answers
+        4. **Review sources** to see where the information came from
+        
+        #### 💡 Tips for Better Results:
+        
+        - Be specific with your questions
+        - Ask one question at a time
+        - Use proper terminology related to finance
+        - Review the suggested follow-up questions
+        
+        #### 🆘 Need Help?
+        
+        Contact your administrator if you:
+        - Cannot access certain documents
+        - Experience technical issues
+        - Need additional features
+        
+        ---
+        
+        **Current Session Info:**
+        - 👤 User: {user_name}
+        - 🎨 Theme: {st.session_state.sidebar_theme}
+        - 📚 Available Documents: {get_document_count()}
+        """)
+        
+        # Quick Stats
+        st.markdown("### 📊 Your Activity")
 
         col1, col2 = st.columns(2)
 
@@ -1066,18 +1177,19 @@ with tab4:
             if st.button("🗑️ Clear History", use_container_width=True):
                 st.session_state.messages = []
                 st.rerun()
-    else:
-        st.info("📝 No messages yet")
+            else:
+                st.info("📝 No messages yet")
 
 # ============================================================================
-# SECTION 8: Footer
+# SECTION 9: Footer
 # ============================================================================
 
 st.markdown("---")
 st.markdown(
     "<p style='text-align: center; color: gray; font-size: 12px;'>"
-    "💼 Finance Chatbot v2.0.0 | Built with Streamlit + Python | "
-    "Powered by Google AI & Ollama | © 2025"
+    "💼 Finance Chatbot v2.1.0 | Built with Streamlit + Python | "
+    "Powered by Google AI & Ollama | © 2025 | 🔐 Secure Login System"
     "</p>",
     unsafe_allow_html=True,
 )
+
