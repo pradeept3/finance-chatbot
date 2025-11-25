@@ -15,8 +15,9 @@ google_client = None
 if GOOGLE_API_KEY:
     try:
         google_client = genai.Client(api_key=GOOGLE_API_KEY)
+        print("[FileAnalyzer] ✓ Google client initialized")
     except Exception as e:
-        print("[Google Init ERROR]", e)
+        print(f"[FileAnalyzer] ✗ Google Init ERROR: {e}")
 
 
 class FileAnalyzer:
@@ -202,3 +203,129 @@ Content:
                 "status": "error",
                 "error": str(e)
             }
+    
+    @staticmethod
+    def analyze_image_with_google(filepath):
+        """Analyze image using Google Gemini Vision - WITH DEBUG LOGGING"""
+        print(f"\n{'='*60}")
+        print(f"[IMAGE ANALYSIS] Starting analysis for: {filepath}")
+        print(f"{'='*60}")
+        
+        try:
+            # Import required libraries
+            print("[1/6] Importing libraries...")
+            import google.generativeai as genai
+            from PIL import Image
+            print("     ✓ Libraries imported")
+            
+            # Check API key
+            print("[2/6] Checking API key...")
+            google_api_key = os.getenv("GOOGLE_API_KEY", "")
+            if not google_api_key:
+                print("     ✗ API key not found")
+                return {
+                    "status": "error",
+                    "error": "Google API key not configured",
+                    "source": "google"
+                }
+            print(f"     ✓ API key found: {google_api_key[:10]}...{google_api_key[-4:]}")
+            
+            # Configure Gemini
+            print("[3/6] Configuring Gemini...")
+            genai.configure(api_key=google_api_key)
+            print("     ✓ Gemini configured")
+            
+            # Open image
+            print(f"[4/6] Opening image: {filepath}")
+            if not os.path.exists(filepath):
+                print(f"     ✗ File not found: {filepath}")
+                return {
+                    "status": "error",
+                    "error": f"File not found: {filepath}",
+                    "source": "google"
+                }
+            
+            img = Image.open(filepath)
+            print(f"     ✓ Image opened - Size: {img.size}, Mode: {img.mode}")
+            
+            # Create model
+            print("[5/6] Creating Gemini Vision model...")
+            model = genai.GenerativeModel('gemini-2.5-flash')
+            print("     ✓ Model created")
+            
+            # Comprehensive analysis prompt
+            prompt = """Analyze this image comprehensively and provide:
+
+1. **Visual Description**: Describe what you see in detail (objects, people, colors, composition)
+2. **Text Extraction**: Extract ALL visible text including signs, labels, documents, watermarks
+3. **Context & Purpose**: What is this image about? What information does it convey?
+4. **Key Information**: Identify key data points, numbers, dates, names
+5. **Technical Details**: Note image quality, style, and any notable visual elements
+
+Be thorough and extract as much information as possible."""
+            
+            # Generate analysis
+            print("[6/6] Sending to Gemini for analysis...")
+            response = model.generate_content([prompt, img])
+            
+            if response and response.text:
+                print("     ✓ Analysis complete!")
+                print(f"     Response length: {len(response.text)} characters")
+                print(f"{'='*60}\n")
+                return {
+                    "status": "success",
+                    "analysis": response.text,
+                    "source": "google"
+                }
+            else:
+                print("     ✗ No response from Gemini")
+                print(f"{'='*60}\n")
+                return {
+                    "status": "error",
+                    "error": "No response from Gemini Vision",
+                    "source": "google"
+                }
+                
+        except Exception as e:
+            print(f"     ✗ ERROR: {str(e)}")
+            import traceback
+            print("\nFull traceback:")
+            traceback.print_exc()
+            print(f"{'='*60}\n")
+            
+            return {
+                "status": "error",
+                "error": f"Failed to analyze image: {str(e)}",
+                "source": "google"
+            }
+
+
+# Test the class on import
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("TESTING FileAnalyzer.analyze_image_with_google()")
+    print("="*60)
+    
+    # Create a test image
+    from PIL import Image
+    test_img = Image.new('RGB', (200, 100), color='red')
+    test_path = "test_analyzer.jpg"
+    test_img.save(test_path)
+    print(f"Created test image: {test_path}")
+    
+    # Test the function
+    result = FileAnalyzer.analyze_image_with_google(test_path)
+    
+    print("\n" + "="*60)
+    print("RESULT:")
+    print("="*60)
+    print(f"Status: {result.get('status')}")
+    if result.get('status') == 'success':
+        print(f"Analysis: {result.get('analysis', '')[:200]}...")
+    else:
+        print(f"Error: {result.get('error')}")
+    print("="*60)
+    
+    # Cleanup
+    os.remove(test_path)
+    print(f"\nCleaned up: {test_path}")

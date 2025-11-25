@@ -1,2 +1,121 @@
-node_modules
+# ----------------------------
+# Python & Virtual Environment
+# ----------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.pkl
+*.pickle
+*.db
+*.sqlite3
+*.log
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+*.env
+*.env.*
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# ----------------------------
+# Streamlit and Frontend Artifacts
+# ----------------------------
+.streamlit/secrets.toml
+.streamlit/*.lock
+.streamlit/*.cache
+
+# Node / NPM
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Streamlit upload temp
+streamlit_uploads/
+
+# ----------------------------
+# Backend
+# ----------------------------
+backend/__pycache__/
+backend/*.pyc
+backend/logs/
+backend/temp/
+backend/*.log
+
+# Avoid committing uploaded files (user docs)
+backend/uploaded_documents/*
+!backend/uploaded_documents/.keep   # keep folder
+
+# Avoid committing processed docs, extracted images, temp PDFs
+backend/data/*
+backend/backend/*
+backend/image_extractor*
+backend/file_analysis*
+
+# Secrets
 backend/.env
+backend/config.json
+
+# ChromaDB (auto-generated vector DB)
+backend/chroma_db/*
+!backend/chroma_db/.keep            # keep directory
+
+# ----------------------------
+# Frontend
+# ----------------------------
+frontend/__pycache__/
+frontend/components/__pycache__/
+frontend/utils/__pycache__/
+frontend/.streamlit/config.toml
+frontend/.streamlit/credentials.toml
+frontend/.cache/
+frontend/tmp/
+frontend/uploaded_files/
+frontend/uploads/
+frontend/assets/
+frontend/files/
+
+# Streamlit’s session cache
+frontend/*.log
+frontend/*.db
+frontend/st.session_state
+
+# ----------------------------
+# Jupyter / Notebooks
+# ----------------------------
+*.ipynb_checkpoints
+*.nbconvert/
+*.sage-cache
+*.julia_history
+
+# ----------------------------
+# OS & Misc
+# ----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----------------------------
+# Archive files (optional)
+# ----------------------------
+*.zip
+*.rar
+*.7z
+*.tar
+*.gz
+
+# ----------------------------
+# Logs & Debug files
+# ----------------------------
+*.log
+logs/
+debug/

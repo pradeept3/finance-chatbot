@@ -3,27 +3,31 @@ import re
 from typing import Dict, Any, List, Optional
 
 import requests
+
+from bs4 import BeautifulSoup
 from google import genai
+from dotenv import load_dotenv
+
 
 # -------------------------------------------------------------------
 #  Configuration
 # -------------------------------------------------------------------
+load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_MODEL = os.getenv("GOOGLE_API_MODEL", "gemini-2.5-flash")
-
 OLLAMA_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "45"))  # 45 seconds default
 
-google_client: Optional[genai.Client] = None
+# Initialize Google client
+google_client = None
 if GOOGLE_API_KEY:
     try:
+        from google import genai
         google_client = genai.Client(api_key=GOOGLE_API_KEY)
-        print("[Response Generator] ✓ Google Gemini initialized")
+        print("[Response Generator] ✓ Google client initialized")
     except Exception as e:
-        print(f"[Response Generator] Google Init ERROR: {e}")
-
+        print(f"[Response Generator] ✗ Google Init ERROR: {e}")
 
 # -------------------------------------------------------------------
 #  Helpers – Chroma results → passages
@@ -80,6 +84,12 @@ def _prepare_passages(retrieved: Dict[str, Any]) -> List[Dict[str, Any]]:
         source = str(meta.get("source", meta.get("file_name", "Unknown")))
         url = meta.get("url") or meta.get("source_url") or None
 
+        # Auto-detect raw URLs inside text
+        found_urls = re.findall(r'https?://\S+', joined)
+        if found_urls and not url:
+            url = found_urls[0]
+
+
         passages.append(
             {
                 "id": f"P{idx + 1}",
@@ -99,7 +109,8 @@ def _prepare_passages(retrieved: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _fetch_url_snippet(url: str, max_chars: int = 3000) -> Optional[str]:
     """
-    Fetch raw HTML for a URL and strip tags into plain text.
+    Fetch the URL and extract readable clean text using BeautifulSoup.
+    Minimal change from your version — only parser improved.
     """
     try:
         resp = requests.get(url, timeout=8)
@@ -111,15 +122,20 @@ def _fetch_url_snippet(url: str, max_chars: int = 3000) -> Optional[str]:
         if not html:
             return None
 
-        html = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-        html = re.sub(r"<style.*?</style>", " ", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = re.sub(r"\s+", " ", text).strip()
+        soup = BeautifulSoup(html, "lxml")
+
+        # remove scripts/styles
+        for tag in soup(["script", "style", "header", "footer", "nav"]):
+            tag.extract()
+
+        text = soup.get_text(separator=" ", strip=True)
+        text = " ".join(text.split())  # compress whitespace
 
         if not text:
             return None
 
         return text[:max_chars]
+
     except Exception as e:
         print(f"[URL FETCH ERROR] {url}: {e}")
         return None
@@ -416,74 +432,196 @@ def _context_only_fallback(
 #  Main entry
 # -------------------------------------------------------------------
 
-def generate_detailed_response(
-    user_query: str,
-    retrieved_data: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Use Gemini and/or Ollama with STRICT RAG over ChromaDB passages and URL content.
-    """
-    print("\n" + "="*60)
-    print(f"[Response] Processing query: {user_query[:60]}...")
-    print("="*60)
+def generate_detailed_response(user_query, retrieved_data):
+    """Generate response using retrieved documents"""
     
-    passages = _prepare_passages(retrieved_data)
-    print(f"[Response] Retrieved {len(passages)} passages from ChromaDB")
+    # 🔍 DEBUG: Check what we received
+    print(f"\n{'='*60}")
+    print(f"[Response Generator] Processing query: {user_query}")
+    print(f"{'='*60}")
+    
+    passages = retrieved_data.get('passages', [])
 
-    # Gather unique URLs from passages and fetch snippets (at most 3)
-    url_snippets: List[Dict[str, str]] = []
+    # Extract URL content from passages
+    url_snippets = []
     seen_urls = set()
+
     for p in passages:
         url = p.get("url")
-        if not url or url in seen_urls:
-            continue
-        snippet = _fetch_url_snippet(url)
-        if snippet:
-            url_snippets.append({"url": url, "text": snippet})
-            seen_urls.add(url)
-        if len(url_snippets) >= 3:
-            break
+        if url and url not in seen_urls:
+            snippet = _fetch_url_snippet(url)
+            if snippet:
+                url_snippets.append({"url": url, "text": snippet})
+                seen_urls.add(url)
 
-    prompt = _build_prompt(user_query, passages, url_snippets)
-
-    print("[Response] Calling LLMs...")
-    google_raw = _call_google(prompt)
-    ollama_raw = _call_ollama(prompt)
-
-    # Decide which answer to trust as main
-    if google_raw and ollama_raw:
-        main_response = google_raw
-        model_used = "google+ollama"
-        print("[Response] Using Google + Ollama (both responded)")
-    elif google_raw:
-        main_response = google_raw
-        model_used = "google"
-        print("[Response] Using Google only (Ollama failed/unavailable)")
-    elif ollama_raw:
-        main_response = ollama_raw
-        model_used = "ollama"
-        print("[Response] Using Ollama only (Google failed/unavailable)")
+    print(f"[Response Generator] Received {len(passages)} passages")
+    
+    if passages:
+        for i, p in enumerate(passages[:3], 1):
+            print(f"   Passage {i}:")
+            print(f"      Source: {p.get('source', 'Unknown')}")
+            print(f"      Text: {p.get('text', '')[:100]}...")
     else:
-        print("[Response] Both LLMs failed - using context-only fallback")
-        fallback = _context_only_fallback(user_query, passages)
-        fallback["passages"] = passages
-        fallback["url_summaries"] = url_snippets
-        return fallback
+        print("[Response Generator] ⚠️ NO PASSAGES RECEIVED!")
+    
+    # Build context from passages
+    context_parts = []
 
-    key_points = _extract_key_points_from_answer(main_response)
-    sections = _build_sections_from_passages(passages)
+    # Add document passages
+    for passage in passages[:5]:
+        source = passage.get('source', 'Unknown')
+        text = passage.get('text', '')
+        context_parts.append(f"[DOC] From {source}:\n{text}\n")
 
-    print("[Response] ✓ Response generation complete")
-    print("="*60 + "\n")
+    # Add URL snippets
+    for idx, item in enumerate(url_snippets, 1):
+        context_parts.append(f"[URL{idx}] ({item['url']}):\n{item['text']}\n")
 
+    
+    context = "\n".join(context_parts)
+    
+    print(f"[Response Generator] Context length: {len(context)} chars")
+    
+    if not context or len(context) < 50:
+        print("[Response Generator] ⚠️ Context too short or empty!")
+        return {
+            "main_response": "I don't have enough information to answer this question. Please make sure documents are uploaded.",
+            "key_points": [],
+            "passages": passages,
+            "sections": [],
+            "google_raw": "",
+            "ollama_raw": "",
+            "model_used": "none"
+        }
+    
+    # Create prompt with context
+    prompt = f"""Based on the following context from uploaded documents, answer the user's question.
+
+CONTEXT FROM DOCUMENTS:
+{context}
+
+USER QUESTION: {user_query}
+
+INSTRUCTIONS:
+- Answer based ONLY on the context provided above
+- If the context doesn't contain enough information, say so clearly
+- Cite specific courses, requirements, or details from the context
+- Be specific and detailed
+- Use bullet points where appropriate
+
+ANSWER:"""
+    
+    print(f"[Response Generator] Prompt ready ({len(prompt)} chars), sending to LLM...")
+    
+    # Call Google Gemini
+    google_response = ""
+    google_raw = ""
+    
+    if google_client:
+        try:
+            print("[Response Generator] Calling Google Gemini...")
+            response = google_client.models.generate_content(
+                model=GOOGLE_MODEL,
+                contents=prompt
+            )
+            google_response = response.text if response else ""
+            google_raw = google_response
+            print(f"[Response Generator] ✓ Google response: {len(google_response)} chars")
+        except Exception as e:
+            print(f"[Response Generator] ✗ Google error: {e}")
+            google_response = f"Error calling Google Gemini: {str(e)}"
+    else:
+        print("[Response Generator] ✗ Google client not available")
+        google_response = "Google API not configured"
+    
+    # Call Ollama (optional)
+    ollama_response = ""
+    ollama_raw = ""
+    
+    try:
+        print("[Response Generator] Calling Ollama...")
+        r = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3}
+            },
+            timeout=30
+        )
+        if r.status_code == 200:
+            ollama_response = r.json().get("response", "")
+            ollama_raw = ollama_response
+            print(f"[Response Generator] ✓ Ollama response: {len(ollama_response)} chars")
+        else:
+            print(f"[Response Generator] ✗ Ollama error: {r.status_code}")
+    except Exception as e:
+        print(f"[Response Generator] ✗ Ollama error: {e}")
+    
+    # Use Google response as main response
+    main_response = google_response or ollama_response or "No response generated"
+    
+    # Extract key points (simple implementation)
+    key_points = []
+    if main_response:
+        sentences = [s.strip() for s in main_response.split('.') if s.strip()]
+        key_points = [s + '.' for s in sentences[:3]]
+    
+    # Determine which model was used
+    if google_response and ollama_response:
+        model_used = "google+ollama"
+    elif google_response:
+        model_used = "google"
+    elif ollama_response:
+        model_used = "ollama"
+    else:
+        model_used = "none"
+    
+    print(f"[Response Generator] ✓ Complete! Model: {model_used}")
+    print(f"{'='*60}\n")
+    
     return {
-        "response": main_response,  # Frontend expects "response"
-        "main_response": main_response,  # Keep for compatibility
+        "main_response": main_response,
         "key_points": key_points,
-        "sections": sections,
-        "ollama_raw": ollama_raw or "",
-        "google_raw": google_raw or "",
+        "sections": [],  # Can be populated if needed
+        "google_raw": google_raw,
+        "ollama_raw": ollama_raw,
         "model_used": model_used,
         "passages": passages,
-        "url_summaries": url_snippets,
+        "url_summaries": url_snippets
+
     }
+
+
+# Test function
+if __name__ == "__main__":
+    print("Testing response generator...")
+    
+    # Mock retrieved data
+    test_data = {
+        "passages": [
+            {
+                "source": "test_prereq.txt",
+                "text": "Finance prerequisite: FNCE 101 Introduction to Finance is required before FNCE 201 Corporate Finance.",
+                "distance": 0.2
+            },
+            {
+                "source": "finance_courses.pdf",
+                "text": "FNCE 121 Financial Management requires OMIS 40, ACTG 11, and proficiency with spreadsheets.",
+                "distance": 0.3
+            }
+        ],
+        "total": 2
+    }
+    
+    # Test query
+    result = generate_detailed_response("What are the finance prerequisites?", test_data)
+    
+    print("\n" + "="*60)
+    print("TEST RESULT:")
+    print("="*60)
+    print(f"Model used: {result['model_used']}")
+    print(f"Response: {result['main_response']}")
+    print(f"Key points: {len(result['key_points'])}")
+    print("="*60)

@@ -9,6 +9,10 @@ from chromadb_setup import (
     query_documents,
     add_documents_to_chromadb,
 )
+
+from PIL import Image
+import google.generativeai as genai
+
 from utils.response_generator import generate_detailed_response
 from utils.document_loader import load_documents, chunk_documents
 from werkzeug.utils import secure_filename
@@ -20,6 +24,7 @@ from werkzeug.serving import WSGIRequestHandler
 WSGIRequestHandler.timeout = 120
 
 load_dotenv()
+
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -37,6 +42,10 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 
+# Configure Google Gemini for image analysis
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    print("✓ Google Gemini configured for image analysis")
 
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -52,6 +61,38 @@ except Exception as e:
     print(f"✗ Error initializing ChromaDB: {e}")
     collection = None
 
+# -----------------------------------------------------------------------------
+# Configure Google Gemini for image analysis
+# -----------------------------------------------------------------------------
+def is_image_file(filename):
+    """Check if file is an image"""
+    image_extensions = {'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'}
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in image_extensions
+
+
+def process_image_with_gemini(image_path):
+    """Process image using Google Gemini Vision API"""
+    try:
+        img = Image.open(image_path)
+        model = genai.GenerativeModel('gemini-2.5-flash')
+        
+        # Comprehensive image analysis
+        prompts = [
+            "Describe this image in detail, including all visible text, objects, colors, and context.",
+            "What information can be extracted from this image?",
+            "List all text content visible in this image."
+        ]
+        
+        descriptions = []
+        for prompt in prompts:
+            response = model.generate_content([prompt, img])
+            if response and response.text:
+                descriptions.append(response.text)
+        
+        return "\n\n".join(descriptions)
+    except Exception as e:
+        print(f"[Image Processing Error] {e}")
+        return f"Error processing image: {str(e)}" 
 
 # -----------------------------------------------------------------------------
 # Health check / status
@@ -87,11 +128,23 @@ def get_status():
 # -----------------------------------------------------------------------------
 # Chat endpoint (RAG over ChromaDB)
 # -----------------------------------------------------------------------------
+# Replace your /api/chat endpoint in app.py with this optimized version:
+
+# Replace your /api/chat endpoint in app.py with this:
+# MINIMAL CHANGES - Just optimize retrieval count
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     try:
         data = request.json or {}
-        user_query = data.get("message", "").strip()
+        
+        # Accept both "message" and "query" for compatibility
+        user_query = data.get("message", "") or data.get("query", "")
+        user_query = user_query.strip()
+        
+        print(f"\n{'='*60}")
+        print(f"[Chat] Received query: {user_query}")
+        print(f"{'='*60}")
 
         if not user_query:
             return (
@@ -115,11 +168,22 @@ def chat():
                 500,
             )
 
-        # Retrieve passages from ChromaDB
-        retrieved_data = query_documents(collection, user_query, n_results=10)
+        # ✅ ONLY CHANGE: Reduce from 10 to 5 results for faster response
+        print("[Chat] Querying ChromaDB...")
+        retrieved_data = query_documents(collection, user_query, n_results=5)
+        
+        print(f"[Chat] Retrieved {len(retrieved_data.get('passages', []))} passages")
+        if retrieved_data.get('passages'):
+            for i, p in enumerate(retrieved_data.get('passages', [])[:3], 1):
+                print(f"  {i}. {p.get('source', 'Unknown')}: {p.get('text', '')[:60]}...")
 
         # Let response_generator build the full RAG answer
+        print("[Chat] Generating response...")
         response_data = generate_detailed_response(user_query, retrieved_data)
+        
+        print(f"[Chat] Response generated ({len(response_data.get('main_response', ''))} chars)")
+        print(f"[Chat] Model used: {response_data.get('model_used', 'unknown')}")
+        print(f"{'='*60}\n")
 
         return (
             jsonify(
@@ -140,13 +204,19 @@ def chat():
         )
 
     except Exception as e:
-        print(f"Error in chat endpoint: {e}")
+        print(f"\n[Chat ERROR] {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*60}\n")
+        
         return (
-            jsonify({"error": str(e), "response": "An error occurred."}),
+            jsonify({
+                "error": str(e), 
+                "response": "An error occurred while processing your request.",
+                "status": "error"
+            }),
             500,
         )
-
-
 # -----------------------------------------------------------------------------
 # Upload & index files into ChromaDB
 # -----------------------------------------------------------------------------
@@ -155,24 +225,50 @@ def upload_documents():
     try:
         if "files" not in request.files:
             return (
-                jsonify(
-                    {
-                        "error": "No files provided",
-                        "message": "Please upload at least one file",
-                    }
-                ),
+                jsonify({
+                    "error": "No files provided",
+                    "message": "Please upload at least one file",
+                }),
                 400,
             )
 
         files = request.files.getlist("files")
         uploaded_files = []
         errors = []
+        image_count = 0
 
         for file in files:
             if file and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
                 filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 file.save(filepath)
+                
+                # ⭐ NEW: Check if file is an image
+                if is_image_file(filename):
+                    print(f"[Image] Processing: {filename}")
+                    
+                    # Process image with Gemini Vision
+                    description = process_image_with_gemini(filepath)
+                    
+                    if description and not description.startswith("Error"):
+                        # Store image description in ChromaDB
+                        from langchain_core.documents import Document
+                        
+                        image_doc = Document(
+                            page_content=description,
+                            metadata={
+                                "source": filename,
+                                "type": "image",
+                                "filepath": filepath
+                            }
+                        )
+                        
+                        add_documents_to_chromadb(collection, [image_doc])
+                        image_count += 1
+                        print(f"[Image] ✓ Processed: {filename}")
+                    else:
+                        errors.append(f"{filename} - Failed to analyze image")
+                
                 uploaded_files.append(filename)
             elif file:
                 errors.append(f"{file.filename} - Invalid file type")
@@ -180,41 +276,42 @@ def upload_documents():
         if uploaded_files:
             print(f"Processing {len(uploaded_files)} uploaded files.")
 
+            # Process regular documents (non-images)
             raw_docs = load_documents(app.config["UPLOAD_FOLDER"])
             chunks = chunk_documents(raw_docs)
-            count = add_documents_to_chromadb(collection, chunks)
+            doc_count = add_documents_to_chromadb(collection, chunks)
+            
+            total_count = doc_count + image_count
 
             return (
-                jsonify(
-                    {
-                        "status": "success",
-                        "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
-                        "files_uploaded": uploaded_files,
-                        "documents_added": count,
-                        "errors": errors,
-                    }
-                ),
+                jsonify({
+                    "status": "success",
+                    "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
+                    "files_uploaded": uploaded_files,
+                    "documents_added": total_count,
+                    "images_processed": image_count,
+                    "errors": errors,
+                }),
                 200,
             )
         else:
             return (
-                jsonify(
-                    {
-                        "status": "error",
-                        "message": "No valid files uploaded",
-                        "errors": errors,
-                    }
-                ),
+                jsonify({
+                    "status": "error",
+                    "message": "No valid files uploaded",
+                    "errors": errors,
+                }),
                 400,
             )
 
     except Exception as e:
         print(f"Error uploading documents: {e}")
+        import traceback
+        traceback.print_exc()
         return (
             jsonify({"error": str(e), "message": "Error uploading documents"}),
             500,
         )
-
 
 # -----------------------------------------------------------------------------
 # Document count
@@ -258,10 +355,22 @@ def analyze_file():
         file.save(filepath)
 
         metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
-        preview = FileAnalyzer.get_file_preview(filepath)
-
-        google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
-        ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
+        
+        # ⭐ Check if image
+        if is_image_file(filename):
+            # Image analysis
+            preview = "Image file - visual analysis below"
+            
+            google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
+            ollama_analysis = {
+                "status": "error",
+                "error": "Ollama does not support image analysis"
+            }
+        else:
+            # Document analysis
+            preview = FileAnalyzer.get_file_preview(filepath)
+            google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
+            ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
 
         response_data = {
             "status": "success",
@@ -278,12 +387,13 @@ def analyze_file():
 
     except Exception as e:
         print(f"Error analyzing file: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e), "status": "error"}), 500
-
 
 @app.route("/api/batch-analyze", methods=["POST"])
 def batch_analyze():
-    """Analyze multiple uploaded files"""
+    """Analyze multiple uploaded files (including images)"""
     try:
         if "files" not in request.files:
             return jsonify({"error": "No files provided"}), 400
@@ -298,10 +408,20 @@ def batch_analyze():
                 file.save(filepath)
 
                 metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
-                preview = FileAnalyzer.get_file_preview(filepath)
-
-                google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
-                ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
+                
+                # ⭐ Check if image
+                if is_image_file(filename):
+                    preview = "Image file - visual analysis below"
+                    
+                    google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
+                    ollama_analysis = {
+                        "status": "error",
+                        "error": "Ollama does not support image analysis"
+                    }
+                else:
+                    preview = FileAnalyzer.get_file_preview(filepath)
+                    google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
+                    ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
 
                 results.append(
                     {
@@ -328,6 +448,8 @@ def batch_analyze():
 
     except Exception as e:
         print(f"Error in batch analysis: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e), "status": "error"}), 500
 
 

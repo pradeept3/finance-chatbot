@@ -37,7 +37,7 @@ def extract_text_from_image_with_gemini(image_path: str) -> Optional[str]:
         )
 
         resp = google_client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="GOOGLE_API_MODEL",
             contents=[
                 {
                     "role": "user",
