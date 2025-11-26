@@ -15,9 +15,13 @@ import google.generativeai as genai
 
 from utils.response_generator import generate_detailed_response
 from utils.document_loader import load_documents, chunk_documents
-from werkzeug.utils import secure_filename
 from utils.file_analyzer import FileAnalyzer
+from utils.url_scraper import scrape_url, is_valid_url
 from next_steps_graph import run_next_steps_graph
+from werkzeug.utils import secure_filename
+
+# ✓ Comprehensive document processor (replaces old vision processor)
+from utils.comprehensive_document_processor import create_comprehensive_document
 
 import requests
 from werkzeug.serving import WSGIRequestHandler
@@ -71,16 +75,16 @@ def is_image_file(filename):
 
 
 def process_image_with_gemini(image_path):
-    """Process image using Google Gemini Vision API"""
+    """Process image using Google Gemini Vision API with detailed analysis"""
     try:
         img = Image.open(image_path)
         model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # Comprehensive image analysis
+        # Use comprehensive prompts for detailed analysis
         prompts = [
-            "Describe this image in detail, including all visible text, objects, colors, and context.",
-            "What information can be extracted from this image?",
-            "List all text content visible in this image."
+            "Extract ALL visible text from this image exactly as shown. Include labels, numbers, headers, and any written content.",
+            "Describe this image in detail: What objects, data, charts, or information does it contain? What is the main purpose?",
+            "If this image contains numbers, data, or metrics, extract and list them all. Include any financial, statistical, or quantitative information."
         ]
         
         descriptions = []
@@ -92,7 +96,7 @@ def process_image_with_gemini(image_path):
         return "\n\n".join(descriptions)
     except Exception as e:
         print(f"[Image Processing Error] {e}")
-        return f"Error processing image: {str(e)}" 
+        return f"Error processing image: {str(e)}"
 
 # -----------------------------------------------------------------------------
 # Health check / status
@@ -128,11 +132,6 @@ def get_status():
 # -----------------------------------------------------------------------------
 # Chat endpoint (RAG over ChromaDB)
 # -----------------------------------------------------------------------------
-# Replace your /api/chat endpoint in app.py with this optimized version:
-
-# Replace your /api/chat endpoint in app.py with this:
-# MINIMAL CHANGES - Just optimize retrieval count
-
 @app.route("/api/chat", methods=["POST"])
 def chat():
     try:
@@ -168,7 +167,7 @@ def chat():
                 500,
             )
 
-        # ✅ ONLY CHANGE: Reduce from 10 to 5 results for faster response
+        # Query ChromaDB
         print("[Chat] Querying ChromaDB...")
         retrieved_data = query_documents(collection, user_query, n_results=5)
         
@@ -177,7 +176,7 @@ def chat():
             for i, p in enumerate(retrieved_data.get('passages', [])[:3], 1):
                 print(f"  {i}. {p.get('source', 'Unknown')}: {p.get('text', '')[:60]}...")
 
-        # Let response_generator build the full RAG answer
+        # Generate response
         print("[Chat] Generating response...")
         response_data = generate_detailed_response(user_query, retrieved_data)
         
@@ -217,102 +216,187 @@ def chat():
             }),
             500,
         )
+
 # -----------------------------------------------------------------------------
 # Upload & index files into ChromaDB
 # -----------------------------------------------------------------------------
+# Replace the entire /api/upload section with this:
+
 @app.route("/api/upload", methods=["POST"])
 def upload_documents():
+    """Upload and process documents with comprehensive detail extraction"""
     try:
-        if "files" not in request.files:
-            return (
-                jsonify({
-                    "error": "No files provided",
-                    "message": "Please upload at least one file",
-                }),
-                400,
-            )
+        files = request.files.getlist("files") if "files" in request.files else []
+        urls = request.form.getlist("urls") if "urls" in request.form else []
+        
+        if not files and not urls:
+            return jsonify({
+                "error": "No files or URLs provided",
+                "message": "Please upload files or provide URLs",
+            }), 400
 
-        files = request.files.getlist("files")
         uploaded_files = []
         errors = []
         image_count = 0
+        url_count = 0
+        vision_enabled_pdfs = 0
+        total_documents_added = 0
 
+        print(f"\n{'='*70}")
+        print(f"[UPLOAD] Starting document processing...")
+        print(f"{'='*70}\n")
+
+        # ========== PROCESS FILES ==========
         for file in files:
             if file and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
                 filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
                 file.save(filepath)
                 
-                # ⭐ NEW: Check if file is an image
-                if is_image_file(filename):
-                    print(f"[Image] Processing: {filename}")
+                print(f"\n[UPLOAD] 📄 Processing: {filename}")
+                print(f"[UPLOAD] Path: {filepath}")
+                
+                # Determine file type
+                ext = filename.rsplit('.', 1)[1].lower()
+                
+                try:
+                    # Use comprehensive processor for ALL file types
+                    print(f"[UPLOAD] 🔍 Calling comprehensive_document_processor...")
+                    result = create_comprehensive_document(filepath, ext)
                     
-                    # Process image with Gemini Vision
-                    description = process_image_with_gemini(filepath)
+                    print(f"[UPLOAD] Result - Success: {result['success']}")
+                    print(f"[UPLOAD] Content length: {len(result['content'])} characters")
+                    print(f"[UPLOAD] Metadata: {result['metadata']}")
                     
-                    if description and not description.startswith("Error"):
-                        # Store image description in ChromaDB
+                    if result["success"] and result["content"]:
                         from langchain_core.documents import Document
                         
-                        image_doc = Document(
-                            page_content=description,
+                        # Create document for ChromaDB
+                        doc = Document(
+                            page_content=result["content"],
+                            metadata=result["metadata"]
+                        )
+                        
+                        print(f"[UPLOAD] 💾 Storing in ChromaDB...")
+                        # Add to ChromaDB - returns number of documents added
+                        docs_added = add_documents_to_chromadb(collection, [doc])
+                        print(f"[UPLOAD] ✓ Stored {docs_added} document chunk(s)")
+                        
+                        total_documents_added += docs_added
+                        
+                        # Track what was processed
+                        if ext in ['jpg', 'jpeg', 'png']:
+                            image_count += 1
+                            print(f"[UPLOAD] ✓ Image counted")
+                        elif ext == 'pdf' and result["metadata"].get("has_images"):
+                            vision_enabled_pdfs += 1
+                            img_cnt = result["metadata"].get("image_count", 0)
+                            image_count += img_cnt
+                            print(f"[UPLOAD] ✓ Vision PDF with {img_cnt} images")
+                        
+                        uploaded_files.append({
+                            "filename": filename,
+                            "size": os.path.getsize(filepath),
+                            "type": ext,
+                            "content_length": len(result["content"]),
+                            "metadata": result["metadata"]
+                        })
+                        
+                        print(f"[UPLOAD] ✓✓✓ {filename} SUCCESS")
+                    else:
+                        error_msg = "Processing failed - no content"
+                        errors.append(f"{filename} - {error_msg}")
+                        print(f"[UPLOAD] ✗ {error_msg}")
+                        
+                except Exception as e:
+                    error_msg = str(e)
+                    errors.append(f"{filename} - {error_msg}")
+                    print(f"[UPLOAD] ✗✗✗ ERROR: {error_msg}")
+                    import traceback
+                    traceback.print_exc()
+            elif file:
+                errors.append(f"{file.filename} - Invalid file type")
+                print(f"[UPLOAD] ✗ Invalid: {file.filename}")
+
+        # ========== PROCESS URLs ==========
+        for url in urls:
+            if is_valid_url(url):
+                print(f"\n[UPLOAD] 🌐 Processing URL: {url}")
+                
+                try:
+                    result = scrape_url(url)
+                    
+                    if result["status"] == "success":
+                        from langchain_core.documents import Document
+                        
+                        url_doc = Document(
+                            page_content=f"Title: {result['title']}\n\nContent:\n{result['content']}",
                             metadata={
-                                "source": filename,
-                                "type": "image",
-                                "filepath": filepath
+                                "source": url,
+                                "type": "url",
+                                "title": result["title"],
+                                "length": len(result["content"])
                             }
                         )
                         
-                        add_documents_to_chromadb(collection, [image_doc])
-                        image_count += 1
-                        print(f"[Image] ✓ Processed: {filename}")
+                        docs_added = add_documents_to_chromadb(collection, [url_doc])
+                        url_count += 1
+                        total_documents_added += docs_added
+                        print(f"[UPLOAD] ✓ URL processed: {url}")
                     else:
-                        errors.append(f"{filename} - Failed to analyze image")
-                
-                uploaded_files.append(filename)
-            elif file:
-                errors.append(f"{file.filename} - Invalid file type")
+                        errors.append(f"{url} - {result.get('error', 'Failed to scrape')}")
+                        print(f"[UPLOAD] ✗ URL failed: {url}")
+                        
+                except Exception as e:
+                    errors.append(f"{url} - {str(e)}")
+                    print(f"[UPLOAD] ✗ URL error: {str(e)}")
+            else:
+                errors.append(f"{url} - Invalid URL")
+                print(f"[UPLOAD] ✗ Invalid URL: {url}")
 
-        if uploaded_files:
-            print(f"Processing {len(uploaded_files)} uploaded files.")
+        print(f"\n{'='*70}")
+        print(f"[UPLOAD] SUMMARY")
+        print(f"{'='*70}")
+        print(f"Files uploaded: {len(uploaded_files)}")
+        print(f"URLs processed: {url_count}")
+        print(f"Images found: {image_count}")
+        print(f"Vision PDFs: {vision_enabled_pdfs}")
+        print(f"Total docs in ChromaDB: {total_documents_added}")
+        print(f"Errors: {len(errors)}")
+        print(f"{'='*70}\n")
 
-            # Process regular documents (non-images)
-            raw_docs = load_documents(app.config["UPLOAD_FOLDER"])
-            chunks = chunk_documents(raw_docs)
-            doc_count = add_documents_to_chromadb(collection, chunks)
-            
-            total_count = doc_count + image_count
-
-            return (
-                jsonify({
-                    "status": "success",
-                    "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
-                    "files_uploaded": uploaded_files,
-                    "documents_added": total_count,
-                    "images_processed": image_count,
-                    "errors": errors,
-                }),
-                200,
-            )
+        # Return comprehensive response
+        if uploaded_files or url_count > 0:
+            return jsonify({
+                "status": "success",
+                "message": f"Successfully processed {len(uploaded_files)} file(s) and {url_count} URL(s)",
+                "files_uploaded": [f["filename"] for f in uploaded_files],
+                "files_detail": uploaded_files,
+                "documents_added": total_documents_added,
+                "images_processed": image_count,
+                "urls_processed": url_count,
+                "vision_enabled_pdfs": vision_enabled_pdfs,
+                "errors": errors,
+                "timestamp": datetime.now().isoformat(),
+            }), 200
         else:
-            return (
-                jsonify({
-                    "status": "error",
-                    "message": "No valid files uploaded",
-                    "errors": errors,
-                }),
-                400,
-            )
+            return jsonify({
+                "status": "error",
+                "message": "No valid files or URLs processed",
+                "errors": errors,
+            }), 400
 
     except Exception as e:
-        print(f"Error uploading documents: {e}")
+        print(f"\n[UPLOAD] ✗✗✗ CRITICAL ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return (
-            jsonify({"error": str(e), "message": "Error uploading documents"}),
-            500,
-        )
-
+        print(f"{'='*70}\n")
+        
+        return jsonify({
+            "error": str(e),
+            "message": "Error uploading documents",
+            "status": "error"
+        }), 500
 # -----------------------------------------------------------------------------
 # Document count
 # -----------------------------------------------------------------------------
@@ -356,10 +440,10 @@ def analyze_file():
 
         metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
         
-        # ⭐ Check if image
+        # ✓ Check if image
         if is_image_file(filename):
-            # Image analysis
-            preview = "Image file - visual analysis below"
+            # Image analysis with enhanced detail
+            preview = "Image file - detailed visual analysis below"
             
             google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
             ollama_analysis = {
@@ -393,7 +477,7 @@ def analyze_file():
 
 @app.route("/api/batch-analyze", methods=["POST"])
 def batch_analyze():
-    """Analyze multiple uploaded files (including images)"""
+    """Analyze multiple uploaded files (including images with detailed vision)"""
     try:
         if "files" not in request.files:
             return jsonify({"error": "No files provided"}), 400
@@ -409,9 +493,9 @@ def batch_analyze():
 
                 metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
                 
-                # ⭐ Check if image
+                # ✓ Check if image
                 if is_image_file(filename):
-                    preview = "Image file - visual analysis below"
+                    preview = "Image file - detailed visual analysis below"
                     
                     google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
                     ollama_analysis = {
@@ -544,6 +628,143 @@ def handle_preflight():
         response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
         response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
         return response, 200
+
+
+# Add this endpoint to app.py to debug document storage:
+
+@app.route("/api/debug-documents", methods=["GET"])
+def debug_documents():
+    """Debug endpoint - shows all documents in ChromaDB"""
+    try:
+        if not collection:
+            return jsonify({"error": "ChromaDB not initialized"}), 500
+
+        print(f"\n{'='*70}")
+        print(f"[DEBUG] Retrieving all documents from ChromaDB...")
+        print(f"{'='*70}\n")
+        
+        total_count = collection.count()
+        print(f"Total documents in ChromaDB: {total_count}\n")
+        
+        if total_count == 0:
+            return jsonify({
+                "status": "empty",
+                "total_documents": 0,
+                "message": "ChromaDB is empty"
+            }), 200
+        
+        # Get a sample of documents
+        results = collection.get(limit=100)
+        
+        documents = []
+        if results and 'documents' in results:
+            for idx, (doc_id, doc_text, metadata) in enumerate(zip(
+                results.get('ids', []),
+                results.get('documents', []),
+                results.get('metadatas', [])
+            ), 1):
+                doc_info = {
+                    "index": idx,
+                    "id": doc_id,
+                    "content_length": len(doc_text),
+                    "content_preview": doc_text[:200] + "..." if len(doc_text) > 200 else doc_text,
+                    "metadata": metadata,
+                    "full_content_length": len(doc_text)
+                }
+                documents.append(doc_info)
+                
+                print(f"[{idx}] ID: {doc_id}")
+                print(f"    Length: {len(doc_text)} chars")
+                print(f"    Metadata: {metadata}")
+                print(f"    Preview: {doc_text[:100]}...\n")
+        
+        return jsonify({
+            "status": "success",
+            "total_documents": total_count,
+            "sample_count": len(documents),
+            "documents": documents,
+            "timestamp": datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        print(f"[DEBUG] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            "error": str(e),
+            "status": "error"
+        }), 500
+
+
+@app.route("/api/search-debug", methods=["POST"])
+def search_debug():
+    """Debug search - shows what's retrieved"""
+    try:
+        data = request.json or {}
+        query = data.get("query", "")
+        
+        if not query:
+            return jsonify({"error": "Query required"}), 400
+        
+        print(f"\n{'='*70}")
+        print(f"[DEBUG SEARCH] Query: {query}")
+        print(f"{'='*70}\n")
+        
+        if not collection:
+            return jsonify({"error": "ChromaDB not initialized"}), 500
+        
+        # Search with different result counts
+        results = collection.query(
+            query_texts=[query],
+            n_results=10,
+            include=["documents", "metadatas", "distances"]
+        )
+        
+        print(f"Retrieved {len(results.get('documents', [[]])[0])} results\n")
+        
+        passages = []
+        docs = results.get('documents', [[]])[0]
+        metas = results.get('metadatas', [[]])[0]
+        dists = results.get('distances', [[]])[0]
+        
+        for idx, (doc_text, metadata, distance) in enumerate(zip(docs, metas, dists), 1):
+            passage = {
+                "rank": idx,
+                "id": f"P{idx}",
+                "source": metadata.get('source', 'Unknown'),
+                "type": metadata.get('type', 'unknown'),
+                "distance": float(distance) if distance else None,
+                "content_length": len(doc_text),
+                "content_preview": doc_text[:300] + "..." if len(doc_text) > 300 else doc_text,
+                "full_content": doc_text,
+                "metadata": metadata
+            }
+            passages.append(passage)
+            
+            print(f"[P{idx}] Distance: {distance:.4f}")
+            print(f"      Source: {metadata.get('source')}")
+            print(f"      Type: {metadata.get('type')}")
+            print(f"      Length: {len(doc_text)} chars")
+            print(f"      Preview: {doc_text[:100]}...\n")
+        
+        return jsonify({
+            "status": "success",
+            "query": query,
+            "results_count": len(passages),
+            "passages": passages,
+            "timestamp": datetime.now().isoformat()
+        }), 200
+        
+    except Exception as e:
+        print(f"[DEBUG SEARCH] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return jsonify({
+            "error": str(e),
+            "status": "error"
+        }), 500
 
 
 # -----------------------------------------------------------------------

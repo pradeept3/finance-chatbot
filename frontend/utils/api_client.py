@@ -38,7 +38,7 @@ def send_message(query, use_google=True, use_ollama=False):
         response = requests.post(
             f"{API_URL}/api/chat",
             json={
-                "message": query,
+                "message": query,  # Changed from "query" to "message" to match backend
                 "use_google": use_google,
                 "use_ollama": use_ollama
             },

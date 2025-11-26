@@ -18,6 +18,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_MODEL = os.getenv("GOOGLE_API_MODEL", "gemini-2.5-flash")
 OLLAMA_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 120))
 
 # Initialize Google client
 google_client = None
@@ -89,7 +90,6 @@ def _prepare_passages(retrieved: Dict[str, Any]) -> List[Dict[str, Any]]:
         if found_urls and not url:
             url = found_urls[0]
 
-
         passages.append(
             {
                 "id": f"P{idx + 1}",
@@ -97,6 +97,8 @@ def _prepare_passages(retrieved: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "source": source,
                 "url": url,
                 "distance": distance,
+                "has_images": meta.get("has_images", False),
+                "image_count": meta.get("image_count", 0),
             }
         )
 
@@ -104,16 +106,18 @@ def _prepare_passages(retrieved: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # -------------------------------------------------------------------
-#  Helpers – URL content
+#  Helpers – URL content with BeautifulSoup
 # -------------------------------------------------------------------
 
 def _fetch_url_snippet(url: str, max_chars: int = 3000) -> Optional[str]:
     """
     Fetch the URL and extract readable clean text using BeautifulSoup.
-    Minimal change from your version — only parser improved.
+    Enhanced version with better parsing and metadata extraction.
+    
+    ✓ VISION SUPPORT: Extracts text from pages containing images
     """
     try:
-        resp = requests.get(url, timeout=8)
+        resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
             print(f"[URL FETCH] HTTP {resp.status_code} for {url}")
             return None
@@ -124,17 +128,41 @@ def _fetch_url_snippet(url: str, max_chars: int = 3000) -> Optional[str]:
 
         soup = BeautifulSoup(html, "lxml")
 
-        # remove scripts/styles
-        for tag in soup(["script", "style", "header", "footer", "nav"]):
-            tag.extract()
+        # Remove scripts, styles, navigation, footers
+        for tag in soup(["script", "style", "header", "footer", "nav", "noscript"]):
+            tag.decompose()
 
+        # Extract metadata
+        meta_description = soup.find("meta", attrs={"name": "description"})
+        description = ""
+        if meta_description and meta_description.get("content"):
+            description = meta_description.get("content", "").strip()
+
+        # Get page title
+        title = soup.title.string if soup.title else ""
+
+        # Extract main content text
         text = soup.get_text(separator=" ", strip=True)
         text = " ".join(text.split())  # compress whitespace
 
-        if not text:
+        # Build comprehensive content
+        content_parts = []
+        
+        if title:
+            content_parts.append(f"[PAGE TITLE] {title}")
+        
+        if description:
+            content_parts.append(f"[META DESCRIPTION] {description}")
+        
+        if text:
+            content_parts.append(f"[PAGE CONTENT] {text}")
+
+        full_content = "\n".join(content_parts)
+
+        if not full_content:
             return None
 
-        return text[:max_chars]
+        return full_content[:max_chars]
 
     except Exception as e:
         print(f"[URL FETCH ERROR] {url}: {e}")
@@ -142,7 +170,7 @@ def _fetch_url_snippet(url: str, max_chars: int = 3000) -> Optional[str]:
 
 
 # -------------------------------------------------------------------
-#  Prompt builder – STRICT RAG
+#  Prompt builder – STRICT RAG with Vision Support
 # -------------------------------------------------------------------
 
 def _build_prompt(
@@ -150,7 +178,10 @@ def _build_prompt(
     passages: List[Dict[str, Any]],
     url_snippets: List[Dict[str, str]],
 ) -> str:
-    """Build a strict RAG prompt"""
+    """
+    Build a strict RAG prompt with vision support indicator.
+    ✓ VISION SUPPORT ENABLED: Includes image analysis descriptions
+    """
     if not passages and not url_snippets:
         return (
             "You are a finance-focused assistant.\n"
@@ -167,6 +198,10 @@ def _build_prompt(
         "You MUST answer the user's question using **only** the information found in:\n"
         "  • the uploaded document passages (labelled P1, P2, ...), and\n"
         "  • the URL page snippets (labelled URL1, URL2, ...).\n\n"
+        "IMPORTANT - VISION SUPPORT ENABLED ✔:\n"
+        "  • Some passages may include extracted image descriptions and OCR text\n"
+        "  • These are marked with [IMAGE ANALYSIS] or [MULTIMODAL]\n"
+        "  • Use this information as part of your answer\n\n"
         "Rules (VERY IMPORTANT):\n"
         "1. Every factual statement in your answer MUST be supported by at least one passage ID "
         "   or URL label. Do **not** rely on outside knowledge.\n"
@@ -177,7 +212,7 @@ def _build_prompt(
 
     lines.append(f"\nUSER QUESTION:\n{user_query}\n")
 
-    # Document passages
+    # Document passages with vision indicators
     if passages:
         lines.append("\n=== DOCUMENT PASSAGES (from uploaded files) ===\n")
         for p in passages[:12]:
@@ -186,8 +221,14 @@ def _build_prompt(
                 snippet = snippet[:1200] + " ..."
             src = p.get("source", "Unknown")
             url = p.get("url") or "None"
+            
+            # Vision indicator
+            vision_indicator = ""
+            if p.get("has_images"):
+                vision_indicator = f" [📷 IMAGES: {p.get('image_count', '?')}]"
+            
             lines.append(
-                f"[{p['id']}] (source file: {src}, url: {url})\n{snippet}\n"
+                f"[{p['id']}] (source file: {src}, url: {url}){vision_indicator}\n{snippet}\n"
             )
 
     # URL snippets
@@ -361,6 +402,8 @@ def _build_sections_from_passages(passages: List[Dict[str, Any]]) -> List[Dict[s
                 "url": p.get("url"),
                 "relevance": relevance,
                 "content": p.get("text", ""),
+                "has_images": p.get("has_images", False),
+                "image_count": p.get("image_count", 0),
             }
         )
 
@@ -433,16 +476,38 @@ def _context_only_fallback(
 # -------------------------------------------------------------------
 
 def generate_detailed_response(user_query, retrieved_data):
-    """Generate response using retrieved documents"""
+    """
+    Generate response using retrieved documents with FULL detail display
+    ✓ Shows complete content from all documents
+    ✓ Displays image analysis in detail
+    ✓ Includes all metadata
+    """
     
-    # 🔍 DEBUG: Check what we received
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"[Response Generator] Processing query: {user_query}")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
     
+    # Get raw passages and ensure they have IDs
     passages = retrieved_data.get('passages', [])
+    
+    print(f"[Response Generator] Retrieved {len(passages)} passages")
+    
+    # Ensure each passage has an 'id' field
+    for idx, p in enumerate(passages):
+        if 'id' not in p:
+            p['id'] = f"P{idx + 1}"
+        
+        # Debug: Print passage info
+        source = p.get('source', 'Unknown')
+        text_len = len(p.get('text', ''))
+        has_images = p.get('has_images', False)
+        image_count = p.get('image_count', 0)
+        
+        print(f"   P{idx + 1}: {source} ({text_len} chars)")
+        if has_images:
+            print(f"          📷 {image_count} images | Metadata: {p.get('metadata', {})}")
 
-    # Extract URL content from passages
+    # Extract URL content from passages using BeautifulSoup
     url_snippets = []
     seen_urls = set()
 
@@ -453,65 +518,99 @@ def generate_detailed_response(user_query, retrieved_data):
             if snippet:
                 url_snippets.append({"url": url, "text": snippet})
                 seen_urls.add(url)
+                print(f"[Response Generator] ✓ URL content fetched: {url}")
 
-    print(f"[Response Generator] Received {len(passages)} passages")
+    print(f"[Response Generator] URL snippets: {len(url_snippets)}")
     
-    if passages:
-        for i, p in enumerate(passages[:3], 1):
-            print(f"   Passage {i}:")
-            print(f"      Source: {p.get('source', 'Unknown')}")
-            print(f"      Text: {p.get('text', '')[:100]}...")
-    else:
-        print("[Response Generator] ⚠️ NO PASSAGES RECEIVED!")
-    
-    # Build context from passages
+    # Build comprehensive context - KEEP ALL DETAILS
     context_parts = []
 
-    # Add document passages
-    for passage in passages[:5]:
+    # Add document passages with COMPLETE content
+    for idx, passage in enumerate(passages, 1):
         source = passage.get('source', 'Unknown')
         text = passage.get('text', '')
-        context_parts.append(f"[DOC] From {source}:\n{text}\n")
+        passage_id = passage.get('id', f'P{idx}')
+        
+        # Add metadata indicators
+        metadata = passage.get('metadata', {})
+        has_images = passage.get('has_images', False)
+        image_count = passage.get('image_count', 0)
+        doc_type = metadata.get('type', 'unknown')
+        
+        # Build comprehensive passage header
+        header = f"\n{'='*70}\n[{passage_id}] SOURCE: {source}\n"
+        header += f"Type: {doc_type} | Content: {len(text)} chars\n"
+        
+        if has_images:
+            header += f"📷 Images: {image_count} (with vision analysis)\n"
+        
+        if metadata:
+            header += f"Metadata: {metadata}\n"
+        
+        header += f"{'='*70}\n"
+        
+        context_parts.append(header + text)
 
     # Add URL snippets
     for idx, item in enumerate(url_snippets, 1):
-        context_parts.append(f"[URL{idx}] ({item['url']}):\n{item['text']}\n")
+        context_parts.append(f"\n{'='*70}\n[URL{idx}] ({item['url']})\n{'='*70}\n{item['text']}")
 
-    
     context = "\n".join(context_parts)
     
-    print(f"[Response Generator] Context length: {len(context)} chars")
+    print(f"[Response Generator] Total context: {len(context)} chars")
     
     if not context or len(context) < 50:
         print("[Response Generator] ⚠️ Context too short or empty!")
         return {
-            "main_response": "I don't have enough information to answer this question. Please make sure documents are uploaded.",
+            "main_response": "I don't have enough information to answer this question. Please upload documents.",
             "key_points": [],
             "passages": passages,
             "sections": [],
             "google_raw": "",
             "ollama_raw": "",
-            "model_used": "none"
+            "model_used": "none",
+            "full_context": "",
+            "retrieved_count": len(passages)
         }
     
-    # Create prompt with context
-    prompt = f"""Based on the following context from uploaded documents, answer the user's question.
+    # Build improved prompt that emphasizes detail
+    prompt = f"""You are a finance expert assistant with access to comprehensive documents.
 
-CONTEXT FROM DOCUMENTS:
+IMPORTANT INSTRUCTIONS:
+1. Use ALL the information provided below
+2. Extract MAXIMUM detail from the documents
+3. Reference specific passages (P1, P2, etc.) in your answer
+4. Include all relevant data, numbers, and details
+5. If documents contain images with analysis, incorporate that information
+6. Be comprehensive and thorough - don't summarize, provide full details
+
+FULL DOCUMENT CONTENT:
 {context}
 
 USER QUESTION: {user_query}
 
-INSTRUCTIONS:
-- Answer based ONLY on the context provided above
-- If the context doesn't contain enough information, say so clearly
-- Cite specific courses, requirements, or details from the context
-- Be specific and detailed
-- Use bullet points where appropriate
+REQUIREMENTS:
+- Answer based ONLY on the provided documents and context
+- Be detailed and specific with all information
+- Quote or closely paraphrase relevant sections
+- Include all data points, numbers, and important details
+- If insufficient information, clearly state that
 
-ANSWER:"""
+ANSWER FORMAT:
+## MAIN ANSWER
+[Comprehensive answer with all details]
+
+## KEY DETAILS
+- Detail 1 (with source reference)
+- Detail 2 (with source reference)
+- Detail 3 (with source reference)
+
+## SOURCES USED
+[List which passages were used]
+"""
     
-    print(f"[Response Generator] Prompt ready ({len(prompt)} chars), sending to LLM...")
+    print(f"[Response Generator] Prompt ready ({len(prompt)} chars)")
+    print(f"[Response Generator] Sending to LLM...\n")
     
     # Call Google Gemini
     google_response = ""
@@ -519,19 +618,19 @@ ANSWER:"""
     
     if google_client:
         try:
-            print("[Response Generator] Calling Google Gemini...")
+            print("[Response Generator] 📡 Calling Google Gemini...")
             response = google_client.models.generate_content(
                 model=GOOGLE_MODEL,
                 contents=prompt
             )
             google_response = response.text if response else ""
             google_raw = google_response
-            print(f"[Response Generator] ✓ Google response: {len(google_response)} chars")
+            print(f"[Response Generator] ✓ Google response: {len(google_response)} chars\n")
         except Exception as e:
-            print(f"[Response Generator] ✗ Google error: {e}")
-            google_response = f"Error calling Google Gemini: {str(e)}"
+            print(f"[Response Generator] ✗ Google error: {e}\n")
+            google_response = f"Error: {str(e)}"
     else:
-        print("[Response Generator] ✗ Google client not available")
+        print("[Response Generator] ✗ Google client not available\n")
         google_response = "Google API not configured"
     
     # Call Ollama (optional)
@@ -539,7 +638,7 @@ ANSWER:"""
     ollama_raw = ""
     
     try:
-        print("[Response Generator] Calling Ollama...")
+        print("[Response Generator] 📡 Calling Ollama...")
         r = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json={
@@ -548,80 +647,51 @@ ANSWER:"""
                 "stream": False,
                 "options": {"temperature": 0.3}
             },
-            timeout=30
+            timeout=120
         )
         if r.status_code == 200:
             ollama_response = r.json().get("response", "")
             ollama_raw = ollama_response
-            print(f"[Response Generator] ✓ Ollama response: {len(ollama_response)} chars")
+            print(f"[Response Generator] ✓ Ollama response: {len(ollama_response)} chars\n")
         else:
-            print(f"[Response Generator] ✗ Ollama error: {r.status_code}")
+            print(f"[Response Generator] ✗ Ollama error: {r.status_code}\n")
     except Exception as e:
-        print(f"[Response Generator] ✗ Ollama error: {e}")
+        print(f"[Response Generator] ⚠️ Ollama not available: {e}\n")
     
     # Use Google response as main response
     main_response = google_response or ollama_response or "No response generated"
     
-    # Extract key points (simple implementation)
+    # Extract key points
     key_points = []
     if main_response:
-        sentences = [s.strip() for s in main_response.split('.') if s.strip()]
-        key_points = [s + '.' for s in sentences[:3]]
+        # Try to extract from KEY DETAILS section
+        if "## KEY DETAILS" in main_response:
+            lines = main_response.split("## KEY DETAILS")[1].split("##")[0].split("\n")
+            key_points = [line.strip() for line in lines if line.strip().startswith("-")]
+        else:
+            # Fallback: extract sentences
+            sentences = [s.strip() for s in main_response.split('.') if s.strip() and len(s.strip()) > 20]
+            key_points = sentences[:5]
     
     # Determine which model was used
-    if google_response and ollama_response:
-        model_used = "google+ollama"
-    elif google_response:
-        model_used = "google"
-    elif ollama_response:
-        model_used = "ollama"
-    else:
-        model_used = "none"
+    model_used = "google" if google_response else "ollama" if ollama_response else "none"
     
-    print(f"[Response Generator] ✓ Complete! Model: {model_used}")
-    print(f"{'='*60}\n")
+    print(f"[Response Generator] ✓ Complete!")
+    print(f"[Response Generator] Model: {model_used}")
+    print(f"[Response Generator] Response length: {len(main_response)} chars")
+    print(f"[Response Generator] Key points: {len(key_points)}")
+    print(f"{'='*70}\n")
     
     return {
         "main_response": main_response,
         "key_points": key_points,
-        "sections": [],  # Can be populated if needed
+        "sections": _build_sections_from_passages(passages),
         "google_raw": google_raw,
         "ollama_raw": ollama_raw,
         "model_used": model_used,
         "passages": passages,
-        "url_summaries": url_snippets
-
+        "url_summaries": url_snippets,
+        "full_context": context,  # Include full context
+        "retrieved_count": len(passages),
+        "total_context_chars": len(context)
     }
-
-
-# Test function
-if __name__ == "__main__":
-    print("Testing response generator...")
-    
-    # Mock retrieved data
-    test_data = {
-        "passages": [
-            {
-                "source": "test_prereq.txt",
-                "text": "Finance prerequisite: FNCE 101 Introduction to Finance is required before FNCE 201 Corporate Finance.",
-                "distance": 0.2
-            },
-            {
-                "source": "finance_courses.pdf",
-                "text": "FNCE 121 Financial Management requires OMIS 40, ACTG 11, and proficiency with spreadsheets.",
-                "distance": 0.3
-            }
-        ],
-        "total": 2
-    }
-    
-    # Test query
-    result = generate_detailed_response("What are the finance prerequisites?", test_data)
-    
-    print("\n" + "="*60)
-    print("TEST RESULT:")
-    print("="*60)
-    print(f"Model used: {result['model_used']}")
-    print(f"Response: {result['main_response']}")
-    print(f"Key points: {len(result['key_points'])}")
-    print("="*60)
