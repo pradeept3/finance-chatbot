@@ -835,8 +835,9 @@ def initialize_session_state():
     if "backend_connected" not in st.session_state:
         st.session_state.backend_connected = False
 
+    # ✅ CHANGED: Google as default instead of "best"
     if "model_mode" not in st.session_state:
-        st.session_state.model_mode = "best"
+        st.session_state.model_mode = "Google only"
     
     # 🔐 Authentication states
     if "authenticated" not in st.session_state:

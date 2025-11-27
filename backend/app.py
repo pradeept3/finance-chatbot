@@ -20,8 +20,13 @@ from utils.url_scraper import scrape_url, is_valid_url
 from next_steps_graph import run_next_steps_graph
 from werkzeug.utils import secure_filename
 
-# ✓ Comprehensive document processor (replaces old vision processor)
+# ✓ Comprehensive document processor
 from utils.comprehensive_document_processor import create_comprehensive_document
+
+# ✅ NEW: Add these imports for URL fetching
+import re
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
 import requests
 from werkzeug.serving import WSGIRequestHandler
@@ -36,7 +41,6 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 UPLOAD_FOLDER = os.getenv("UPLOAD_DIR", "./uploaded_documents")
 MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", 50)) * 1024 * 1024
 
-# Allow images too if you want to analyze them
 ALLOWED_EXTENSIONS = {"pdf", "docx", "xlsx", "txt", "png", "jpg", "jpeg"}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -46,7 +50,6 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_FILE_SIZE
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 
-# Configure Google Gemini for image analysis
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     print("✓ Google Gemini configured for image analysis")
@@ -65,8 +68,79 @@ except Exception as e:
     print(f"✗ Error initializing ChromaDB: {e}")
     collection = None
 
+
 # -----------------------------------------------------------------------------
-# Configure Google Gemini for image analysis
+# ✅ NEW: URL Fetching Functions
+# -----------------------------------------------------------------------------
+def extract_text_from_url(url: str) -> dict:
+    """Extract text content from a URL"""
+    try:
+        print(f"[URL Fetch] Fetching: {url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Remove unwanted elements
+        for script in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            script.decompose()
+        
+        title = soup.title.string if soup.title else url
+        text = soup.get_text()
+        
+        # Clean up text
+        lines = (line.strip() for line in text.splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        text = ' '.join(chunk for chunk in chunks if chunk)
+        
+        # Limit text length
+        text = text[:8000]  # Increased to 8000 chars for better context
+        
+        print(f"[URL Fetch] ✓ Fetched {len(text)} chars from {url}")
+        
+        return {
+            "text": text,
+            "title": title,
+            "url": url,
+            "error": None
+        }
+        
+    except Exception as e:
+        print(f"[URL Fetch] ✗ Error fetching {url}: {e}")
+        return {
+            "text": "",
+            "title": url,
+            "url": url,
+            "error": str(e)
+        }
+
+
+def detect_and_fetch_urls(query: str) -> list:
+    """Detect URLs in query and fetch their content"""
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    urls = re.findall(url_pattern, query)
+    
+    if not urls:
+        return []
+    
+    print(f"[URL Detection] Found {len(urls)} URLs in query")
+    
+    results = []
+    for url in urls:
+        result = extract_text_from_url(url)
+        if result["text"]:
+            results.append(result)
+    
+    return results
+
+
+# -----------------------------------------------------------------------------
+# Image processing
 # -----------------------------------------------------------------------------
 def is_image_file(filename):
     """Check if file is an image"""
@@ -80,7 +154,6 @@ def process_image_with_gemini(image_path):
         img = Image.open(image_path)
         model = genai.GenerativeModel('gemini-2.5-flash')
         
-        # Use comprehensive prompts for detailed analysis
         prompts = [
             "Extract ALL visible text from this image exactly as shown. Include labels, numbers, headers, and any written content.",
             "Describe this image in detail: What objects, data, charts, or information does it contain? What is the main purpose?",
@@ -98,21 +171,17 @@ def process_image_with_gemini(image_path):
         print(f"[Image Processing Error] {e}")
         return f"Error processing image: {str(e)}"
 
+
 # -----------------------------------------------------------------------------
 # Health check / status
 # -----------------------------------------------------------------------------
 @app.route("/api/health", methods=["GET"])
 def health_check():
-    return (
-        jsonify(
-            {
-                "status": "healthy",
-                "message": "Finance Chatbot Backend is running",
-                "timestamp": datetime.now().isoformat(),
-            }
-        ),
-        200,
-    )
+    return jsonify({
+        "status": "healthy",
+        "message": "Finance Chatbot Backend is running",
+        "timestamp": datetime.now().isoformat(),
+    }), 200
 
 
 @app.route("/api/status", methods=["GET"])
@@ -130,98 +199,103 @@ def get_status():
 
 
 # -----------------------------------------------------------------------------
-# Chat endpoint (RAG over ChromaDB)
+# ✅ UPDATED: Chat endpoint with URL fetching
 # -----------------------------------------------------------------------------
 @app.route("/api/chat", methods=["POST"])
 def chat():
     try:
         data = request.json or {}
         
-        # Accept both "message" and "query" for compatibility
         user_query = data.get("message", "") or data.get("query", "")
         user_query = user_query.strip()
         
-        print(f"\n{'='*60}")
+        model_mode = data.get("model_mode", "Best (Google + Ollama)")
+        
+        print(f"\n{'='*70}")
         print(f"[Chat] Received query: {user_query}")
-        print(f"{'='*60}")
+        print(f"[Chat] Model mode: {model_mode}")
+        print(f"{'='*70}")
 
         if not user_query:
-            return (
-                jsonify(
-                    {
-                        "error": "Message required",
-                        "response": "Please provide a message.",
-                    }
-                ),
-                400,
-            )
+            return jsonify({
+                "error": "Message required",
+                "response": "Please provide a message.",
+            }), 400
 
         if not collection:
-            return (
-                jsonify(
-                    {
-                        "error": "DB error",
-                        "response": "System error: Database not initialized.",
-                    }
-                ),
-                500,
-            )
+            return jsonify({
+                "error": "DB error",
+                "response": "System error: Database not initialized.",
+            }), 500
+
+        # ✅ NEW: Check for URLs in the query and fetch them
+        url_contents = detect_and_fetch_urls(user_query)
+        
+        if url_contents:
+            print(f"[Chat] Fetched content from {len(url_contents)} URLs")
+            
+            # Add URL content to the query context
+            url_context = "\n\n=== CONTENT FROM PROVIDED URLs ===\n\n"
+            for idx, url_data in enumerate(url_contents, 1):
+                url_context += f"[Source {idx}] {url_data['title']}\n"
+                url_context += f"URL: {url_data['url']}\n"
+                url_context += f"Content: {url_data['text']}\n\n"
+            
+            # Prepend URL context to query for the LLM
+            enhanced_query = f"{url_context}\n\nUser Question: {user_query}"
+        else:
+            enhanced_query = user_query
+            url_context = ""
 
         # Query ChromaDB
         print("[Chat] Querying ChromaDB...")
         retrieved_data = query_documents(collection, user_query, n_results=5)
         
         print(f"[Chat] Retrieved {len(retrieved_data.get('passages', []))} passages")
-        if retrieved_data.get('passages'):
-            for i, p in enumerate(retrieved_data.get('passages', [])[:3], 1):
-                print(f"  {i}. {p.get('source', 'Unknown')}: {p.get('text', '')[:60]}...")
 
-        # Generate response
+        # Generate response with enhanced query
         print("[Chat] Generating response...")
-        response_data = generate_detailed_response(user_query, retrieved_data)
+        response_data = generate_detailed_response(
+            user_query=enhanced_query,  # ✅ Use enhanced query with URL content
+            retrieved_data=retrieved_data,
+            model_mode=model_mode
+        )
         
         print(f"[Chat] Response generated ({len(response_data.get('main_response', ''))} chars)")
         print(f"[Chat] Model used: {response_data.get('model_used', 'unknown')}")
-        print(f"{'='*60}\n")
+        print(f"{'='*70}\n")
 
-        return (
-            jsonify(
-                {
-                    "response": response_data["main_response"],
-                    "key_points": response_data["key_points"],
-                    "sections": response_data["sections"],
-                    "google_raw": response_data["google_raw"],
-                    "ollama_raw": response_data["ollama_raw"],
-                    "model_used": response_data["model_used"],
-                    "passages": response_data["passages"],
-                    "url_summaries": response_data.get("url_summaries", []),
-                    "timestamp": datetime.now().isoformat(),
-                    "status": "success",
-                }
-            ),
-            200,
-        )
+        return jsonify({
+            "response": response_data["main_response"],
+            "key_points": response_data["key_points"],
+            "sections": response_data.get("sections", []),
+            "google_raw": response_data.get("google_raw", ""),
+            "ollama_raw": response_data.get("ollama_raw", ""),
+            "openai_raw": response_data.get("openai_raw", ""),
+            "model_used": response_data["model_used"],
+            "selected_model": response_data.get("selected_model", model_mode),
+            "passages": response_data["passages"],
+            "url_summaries": url_contents,  # ✅ Include fetched URLs
+            "timestamp": datetime.now().isoformat(),
+            "status": "success",
+        }), 200
 
     except Exception as e:
         print(f"\n[Chat ERROR] {e}")
         import traceback
         traceback.print_exc()
-        print(f"{'='*60}\n")
+        print(f"{'='*70}\n")
         
-        return (
-            jsonify({
-                "error": str(e), 
-                "response": "An error occurred while processing your request.",
-                "status": "error"
-            }),
-            500,
-        )
+        return jsonify({
+            "error": str(e), 
+            "response": "An error occurred while processing your request.",
+            "status": "error"
+        }), 500
+
 
 # -----------------------------------------------------------------------------
 # Upload & index files into ChromaDB
 # -----------------------------------------------------------------------------
-# Replace the entire /api/upload section with this:
-
 @app.route("/api/upload", methods=["POST"])
 def upload_documents():
     """Upload and process documents with comprehensive detail extraction"""
@@ -246,7 +320,7 @@ def upload_documents():
         print(f"[UPLOAD] Starting document processing...")
         print(f"{'='*70}\n")
 
-        # ========== PROCESS FILES ==========
+        # Process files
         for file in files:
             if file and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
@@ -254,45 +328,29 @@ def upload_documents():
                 file.save(filepath)
                 
                 print(f"\n[UPLOAD] 📄 Processing: {filename}")
-                print(f"[UPLOAD] Path: {filepath}")
                 
-                # Determine file type
                 ext = filename.rsplit('.', 1)[1].lower()
                 
                 try:
-                    # Use comprehensive processor for ALL file types
                     print(f"[UPLOAD] 🔍 Calling comprehensive_document_processor...")
                     result = create_comprehensive_document(filepath, ext)
-                    
-                    print(f"[UPLOAD] Result - Success: {result['success']}")
-                    print(f"[UPLOAD] Content length: {len(result['content'])} characters")
-                    print(f"[UPLOAD] Metadata: {result['metadata']}")
                     
                     if result["success"] and result["content"]:
                         from langchain_core.documents import Document
                         
-                        # Create document for ChromaDB
                         doc = Document(
                             page_content=result["content"],
                             metadata=result["metadata"]
                         )
                         
-                        print(f"[UPLOAD] 💾 Storing in ChromaDB...")
-                        # Add to ChromaDB - returns number of documents added
                         docs_added = add_documents_to_chromadb(collection, [doc])
-                        print(f"[UPLOAD] ✓ Stored {docs_added} document chunk(s)")
-                        
                         total_documents_added += docs_added
                         
-                        # Track what was processed
                         if ext in ['jpg', 'jpeg', 'png']:
                             image_count += 1
-                            print(f"[UPLOAD] ✓ Image counted")
                         elif ext == 'pdf' and result["metadata"].get("has_images"):
                             vision_enabled_pdfs += 1
-                            img_cnt = result["metadata"].get("image_count", 0)
-                            image_count += img_cnt
-                            print(f"[UPLOAD] ✓ Vision PDF with {img_cnt} images")
+                            image_count += result["metadata"].get("image_count", 0)
                         
                         uploaded_files.append({
                             "filename": filename,
@@ -304,21 +362,16 @@ def upload_documents():
                         
                         print(f"[UPLOAD] ✓✓✓ {filename} SUCCESS")
                     else:
-                        error_msg = "Processing failed - no content"
-                        errors.append(f"{filename} - {error_msg}")
-                        print(f"[UPLOAD] ✗ {error_msg}")
+                        errors.append(f"{filename} - Processing failed")
+                        print(f"[UPLOAD] ✗ Processing failed")
                         
                 except Exception as e:
-                    error_msg = str(e)
-                    errors.append(f"{filename} - {error_msg}")
-                    print(f"[UPLOAD] ✗✗✗ ERROR: {error_msg}")
-                    import traceback
-                    traceback.print_exc()
+                    errors.append(f"{filename} - {str(e)}")
+                    print(f"[UPLOAD] ✗✗✗ ERROR: {e}")
             elif file:
                 errors.append(f"{file.filename} - Invalid file type")
-                print(f"[UPLOAD] ✗ Invalid: {file.filename}")
 
-        # ========== PROCESS URLs ==========
+        # Process URLs
         for url in urls:
             if is_valid_url(url):
                 print(f"\n[UPLOAD] 🌐 Processing URL: {url}")
@@ -342,30 +395,19 @@ def upload_documents():
                         docs_added = add_documents_to_chromadb(collection, [url_doc])
                         url_count += 1
                         total_documents_added += docs_added
-                        print(f"[UPLOAD] ✓ URL processed: {url}")
+                        print(f"[UPLOAD] ✓ URL processed")
                     else:
-                        errors.append(f"{url} - {result.get('error', 'Failed to scrape')}")
-                        print(f"[UPLOAD] ✗ URL failed: {url}")
+                        errors.append(f"{url} - Failed to scrape")
                         
                 except Exception as e:
                     errors.append(f"{url} - {str(e)}")
-                    print(f"[UPLOAD] ✗ URL error: {str(e)}")
             else:
                 errors.append(f"{url} - Invalid URL")
-                print(f"[UPLOAD] ✗ Invalid URL: {url}")
 
         print(f"\n{'='*70}")
-        print(f"[UPLOAD] SUMMARY")
-        print(f"{'='*70}")
-        print(f"Files uploaded: {len(uploaded_files)}")
-        print(f"URLs processed: {url_count}")
-        print(f"Images found: {image_count}")
-        print(f"Vision PDFs: {vision_enabled_pdfs}")
-        print(f"Total docs in ChromaDB: {total_documents_added}")
-        print(f"Errors: {len(errors)}")
+        print(f"[UPLOAD] SUMMARY: {len(uploaded_files)} files, {url_count} URLs, {total_documents_added} docs")
         print(f"{'='*70}\n")
 
-        # Return comprehensive response
         if uploaded_files or url_count > 0:
             return jsonify({
                 "status": "success",
@@ -390,13 +432,14 @@ def upload_documents():
         print(f"\n[UPLOAD] ✗✗✗ CRITICAL ERROR: {e}")
         import traceback
         traceback.print_exc()
-        print(f"{'='*70}\n")
         
         return jsonify({
             "error": str(e),
             "message": "Error uploading documents",
             "status": "error"
         }), 500
+
+
 # -----------------------------------------------------------------------------
 # Document count
 # -----------------------------------------------------------------------------
@@ -406,25 +449,20 @@ def get_documents_count():
         if not collection:
             return jsonify({"error": "ChromaDB not initialized"}), 500
 
-        return (
-            jsonify(
-                {
-                    "total_documents": collection.count(),
-                    "status": "success",
-                }
-            ),
-            200,
-        )
+        return jsonify({
+            "total_documents": collection.count(),
+            "status": "success",
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # -----------------------------------------------------------------------------
-# File analysis (Google + Ollama)
+# File analysis
 # -----------------------------------------------------------------------------
 @app.route("/api/analyze-file", methods=["POST"])
 def analyze_file():
-    """Analyze uploaded file with Google API and Ollama"""
+    """Analyze uploaded file"""
     try:
         if "file" not in request.files:
             return jsonify({"error": "No file provided"}), 400
@@ -440,23 +478,19 @@ def analyze_file():
 
         metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
         
-        # ✓ Check if image
         if is_image_file(filename):
-            # Image analysis with enhanced detail
             preview = "Image file - detailed visual analysis below"
-            
             google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
             ollama_analysis = {
                 "status": "error",
                 "error": "Ollama does not support image analysis"
             }
         else:
-            # Document analysis
             preview = FileAnalyzer.get_file_preview(filepath)
             google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
             ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
 
-        response_data = {
+        return jsonify({
             "status": "success",
             "file": metadata,
             "preview": preview,
@@ -465,19 +499,16 @@ def analyze_file():
                 "ollama": ollama_analysis,
             },
             "timestamp": datetime.now().isoformat(),
-        }
-
-        return jsonify(response_data), 200
+        }), 200
 
     except Exception as e:
         print(f"Error analyzing file: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e), "status": "error"}), 500
+
 
 @app.route("/api/batch-analyze", methods=["POST"])
 def batch_analyze():
-    """Analyze multiple uploaded files (including images with detailed vision)"""
+    """Analyze multiple files"""
     try:
         if "files" not in request.files:
             return jsonify({"error": "No files provided"}), 400
@@ -493,47 +524,33 @@ def batch_analyze():
 
                 metadata = FileAnalyzer.extract_file_metadata(filepath, filename)
                 
-                # ✓ Check if image
                 if is_image_file(filename):
-                    preview = "Image file - detailed visual analysis below"
-                    
+                    preview = "Image file"
                     google_analysis = FileAnalyzer.analyze_image_with_google(filepath)
-                    ollama_analysis = {
-                        "status": "error",
-                        "error": "Ollama does not support image analysis"
-                    }
+                    ollama_analysis = {"status": "error", "error": "Not supported"}
                 else:
                     preview = FileAnalyzer.get_file_preview(filepath)
                     google_analysis = FileAnalyzer.analyze_with_google(filepath, preview)
                     ollama_analysis = FileAnalyzer.analyze_with_ollama(filepath, preview)
 
-                results.append(
-                    {
-                        "file": metadata,
-                        "preview": preview[:300],
-                        "analysis": {
-                            "google": google_analysis,
-                            "ollama": ollama_analysis,
-                        },
-                    }
-                )
+                results.append({
+                    "file": metadata,
+                    "preview": preview[:300],
+                    "analysis": {
+                        "google": google_analysis,
+                        "ollama": ollama_analysis,
+                    },
+                })
 
-        return (
-            jsonify(
-                {
-                    "status": "success",
-                    "files_analyzed": len(results),
-                    "results": results,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            ),
-            200,
-        )
+        return jsonify({
+            "status": "success",
+            "files_analyzed": len(results),
+            "results": results,
+            "timestamp": datetime.now().isoformat(),
+        }), 200
 
     except Exception as e:
         print(f"Error in batch analysis: {e}")
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e), "status": "error"}), 500
 
 
@@ -543,52 +560,31 @@ def batch_analyze():
 @app.route("/api/ai-status", methods=["GET"])
 def ai_status():
     try:
-        # Google
         google_status = "configured" if GOOGLE_API_KEY else "not_configured"
 
-        # Ollama
         ollama_status = "disconnected"
         try:
             resp = requests.get(f"{OLLAMA_API_URL}/api/tags", timeout=5)
             if resp.status_code == 200:
                 ollama_status = "connected"
         except Exception:
-            ollama_status = "disconnected"
+            pass
 
-        return (
-            jsonify(
-                {
-                    "status": "success",
-                    "google_api": google_status,
-                    "ollama": ollama_status,
-                    "timestamp": datetime.now().isoformat(),
-                }
-            ),
-            200,
-        )
+        return jsonify({
+            "status": "success",
+            "google_api": google_status,
+            "ollama": ollama_status,
+            "timestamp": datetime.now().isoformat(),
+        }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
-# -----------------------------------------------------------------------
-# NEXT STEPS ENDPOINT (Rule-based suggester)
-# -----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Next steps endpoint
+# -----------------------------------------------------------------------------
 @app.route("/api/next-steps", methods=["POST"])
 def api_next_steps():
-    """
-    Accepts:
-      {
-        "user_question": "...",
-        "answer_text": "...",
-        "key_points": [...]
-      }
-
-    Returns:
-      {
-        "suggestions": [ {label, category, reason}, ... ],
-        "error": null | str
-      }
-    """
     try:
         data = request.get_json(force=True) or {}
 
@@ -597,12 +593,10 @@ def api_next_steps():
         key_points = data.get("key_points") or []
 
         if not user_question or not answer_text:
-            return jsonify(
-                {
-                    "error": "user_question and answer_text are required",
-                    "suggestions": [],
-                }
-            ), 400
+            return jsonify({
+                "error": "user_question and answer_text are required",
+                "suggestions": [],
+            }), 400
 
         result = run_next_steps_graph(
             user_question=user_question,
@@ -617,34 +611,17 @@ def api_next_steps():
         return jsonify({"error": str(e), "suggestions": []}), 500
 
 
-# -----------------------------------------------------------------------
-# CORS preflight handler
-# -----------------------------------------------------------------------
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = jsonify({"status": "ok"})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
-        return response, 200
-
-
-# Add this endpoint to app.py to debug document storage:
-
+# -----------------------------------------------------------------------------
+# Debug endpoints
+# -----------------------------------------------------------------------------
 @app.route("/api/debug-documents", methods=["GET"])
 def debug_documents():
-    """Debug endpoint - shows all documents in ChromaDB"""
+    """Debug endpoint - shows all documents"""
     try:
         if not collection:
             return jsonify({"error": "ChromaDB not initialized"}), 500
 
-        print(f"\n{'='*70}")
-        print(f"[DEBUG] Retrieving all documents from ChromaDB...")
-        print(f"{'='*70}\n")
-        
         total_count = collection.count()
-        print(f"Total documents in ChromaDB: {total_count}\n")
         
         if total_count == 0:
             return jsonify({
@@ -653,7 +630,6 @@ def debug_documents():
                 "message": "ChromaDB is empty"
             }), 200
         
-        # Get a sample of documents
         results = collection.get(limit=100)
         
         documents = []
@@ -663,20 +639,13 @@ def debug_documents():
                 results.get('documents', []),
                 results.get('metadatas', [])
             ), 1):
-                doc_info = {
+                documents.append({
                     "index": idx,
                     "id": doc_id,
                     "content_length": len(doc_text),
-                    "content_preview": doc_text[:200] + "..." if len(doc_text) > 200 else doc_text,
+                    "content_preview": doc_text[:200] + "...",
                     "metadata": metadata,
-                    "full_content_length": len(doc_text)
-                }
-                documents.append(doc_info)
-                
-                print(f"[{idx}] ID: {doc_id}")
-                print(f"    Length: {len(doc_text)} chars")
-                print(f"    Metadata: {metadata}")
-                print(f"    Preview: {doc_text[:100]}...\n")
+                })
         
         return jsonify({
             "status": "success",
@@ -687,19 +656,12 @@ def debug_documents():
         }), 200
         
     except Exception as e:
-        print(f"[DEBUG] Error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 
 @app.route("/api/search-debug", methods=["POST"])
 def search_debug():
-    """Debug search - shows what's retrieved"""
+    """Debug search"""
     try:
         data = request.json or {}
         query = data.get("query", "")
@@ -707,21 +669,14 @@ def search_debug():
         if not query:
             return jsonify({"error": "Query required"}), 400
         
-        print(f"\n{'='*70}")
-        print(f"[DEBUG SEARCH] Query: {query}")
-        print(f"{'='*70}\n")
-        
         if not collection:
             return jsonify({"error": "ChromaDB not initialized"}), 500
         
-        # Search with different result counts
         results = collection.query(
             query_texts=[query],
             n_results=10,
             include=["documents", "metadatas", "distances"]
         )
-        
-        print(f"Retrieved {len(results.get('documents', [[]])[0])} results\n")
         
         passages = []
         docs = results.get('documents', [[]])[0]
@@ -729,47 +684,41 @@ def search_debug():
         dists = results.get('distances', [[]])[0]
         
         for idx, (doc_text, metadata, distance) in enumerate(zip(docs, metas, dists), 1):
-            passage = {
+            passages.append({
                 "rank": idx,
-                "id": f"P{idx}",
                 "source": metadata.get('source', 'Unknown'),
-                "type": metadata.get('type', 'unknown'),
-                "distance": float(distance) if distance else None,
-                "content_length": len(doc_text),
-                "content_preview": doc_text[:300] + "..." if len(doc_text) > 300 else doc_text,
-                "full_content": doc_text,
+                "distance": float(distance),
+                "content_preview": doc_text[:300],
                 "metadata": metadata
-            }
-            passages.append(passage)
-            
-            print(f"[P{idx}] Distance: {distance:.4f}")
-            print(f"      Source: {metadata.get('source')}")
-            print(f"      Type: {metadata.get('type')}")
-            print(f"      Length: {len(doc_text)} chars")
-            print(f"      Preview: {doc_text[:100]}...\n")
+            })
         
         return jsonify({
             "status": "success",
             "query": query,
             "results_count": len(passages),
             "passages": passages,
-            "timestamp": datetime.now().isoformat()
         }), 200
         
     except Exception as e:
-        print(f"[DEBUG SEARCH] Error: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 
-# -----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# CORS preflight
+# -----------------------------------------------------------------------------
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({"status": "ok"})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+        response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+        return response, 200
+
+
+# -----------------------------------------------------------------------------
 # Main
-# -----------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"Starting Finance Chatbot Backend on port {port}...")

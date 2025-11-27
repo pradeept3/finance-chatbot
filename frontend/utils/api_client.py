@@ -1,4 +1,4 @@
-# frontend/utils/api_client.py - MINIMAL CHANGES FOR SPEED
+# frontend/utils/api_client.py - UPDATED FOR GOOGLE DEFAULT
 
 import requests
 import streamlit as st
@@ -34,21 +34,27 @@ def send_message(query, use_google=True, use_ollama=False):
     try:
         print(f"[API Client] Sending query: {query[:50]}...")
         
-        # ✅ ONLY CHANGE: Increased timeout to 120 seconds
+        # ✅ UPDATED: Get model_mode from sidebar with Google default
+        model_mode = st.session_state.get("model_mode", "Google only")  # ✅ CHANGED
+        print(f"[API Client] Model mode: {model_mode}")
+        
+        # Send model_mode to backend
         response = requests.post(
             f"{API_URL}/api/chat",
             json={
-                "message": query,  # Changed from "query" to "message" to match backend
+                "message": query,
+                "model_mode": model_mode,
                 "use_google": use_google,
                 "use_ollama": use_ollama
             },
-            timeout=120  # Changed from 60 to 120
+            timeout=120
         )
         
         print(f"[API Client] Status code: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
+            print(f"[API Client] Model used: {data.get('model_used', 'unknown')}")
             print(f"[API Client] Response keys: {list(data.keys())}")
             return data
         else:

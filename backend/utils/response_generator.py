@@ -8,6 +8,14 @@ from bs4 import BeautifulSoup
 from google import genai
 from dotenv import load_dotenv
 
+# ✓ NEW: DeepSeek imports (replaces OpenAI)
+try:
+    from openai import OpenAI  # DeepSeek uses OpenAI client format
+    DEEPSEEK_AVAILABLE = True
+except ImportError:
+    DEEPSEEK_AVAILABLE = False
+    print("[Response Generator] ⚠️ DeepSeek library not installed. Run: pip install openai")
+
 
 # -------------------------------------------------------------------
 #  Configuration
@@ -16,6 +24,12 @@ load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GOOGLE_MODEL = os.getenv("GOOGLE_API_MODEL", "gemini-2.5-flash")
+
+# ✓ NEW: DeepSeek configuration (replaces OpenAI)
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
 OLLAMA_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:latest")
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 120))
@@ -29,6 +43,22 @@ if GOOGLE_API_KEY:
         print("[Response Generator] ✓ Google client initialized")
     except Exception as e:
         print(f"[Response Generator] ✗ Google Init ERROR: {e}")
+
+# ✓ NEW: Initialize DeepSeek client (replaces OpenAI)
+deepseek_client = None
+if DEEPSEEK_API_KEY and DEEPSEEK_AVAILABLE:
+    try:
+        deepseek_client = OpenAI(
+            api_key=DEEPSEEK_API_KEY,
+            base_url=DEEPSEEK_BASE_URL
+        )
+        print("[Response Generator] ✓ DeepSeek client initialized")
+    except Exception as e:
+        print(f"[Response Generator] ✗ DeepSeek Init ERROR: {e}")
+elif DEEPSEEK_API_KEY and not DEEPSEEK_AVAILABLE:
+    print("[Response Generator] ⚠️ DeepSeek API key set but library not installed")
+else:
+    print("[Response Generator] ⚠️ DeepSeek API key not configured")
 
 # -------------------------------------------------------------------
 #  Helpers – Chroma results → passages
@@ -198,7 +228,7 @@ def _build_prompt(
         "You MUST answer the user's question using **only** the information found in:\n"
         "  • the uploaded document passages (labelled P1, P2, ...), and\n"
         "  • the URL page snippets (labelled URL1, URL2, ...).\n\n"
-        "IMPORTANT - VISION SUPPORT ENABLED ✔:\n"
+        "IMPORTANT - VISION SUPPORT ENABLED ✓:\n"
         "  • Some passages may include extracted image descriptions and OCR text\n"
         "  • These are marked with [IMAGE ANALYSIS] or [MULTIMODAL]\n"
         "  • Use this information as part of your answer\n\n"
@@ -283,6 +313,36 @@ def _call_google(prompt: str) -> Optional[str]:
         return text
     except Exception as e:
         print(f"[Google ERROR] {e}")
+        return None
+
+
+# ✓ NEW: DeepSeek caller (replaces OpenAI)
+def _call_deepseek(prompt: str) -> Optional[str]:
+    """Call DeepSeek Chat"""
+    if deepseek_client is None:
+        print("[DeepSeek] Client not initialized")
+        return None
+
+    try:
+        print(f"[DeepSeek] Calling {DEEPSEEK_MODEL}...")
+        response = deepseek_client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful finance expert assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=2000
+        )
+        text = response.choices[0].message.content
+        text = text.strip()
+        if not text:
+            print("[DeepSeek] Empty response")
+            return None
+        print(f"[DeepSeek] ✓ Response received ({len(text)} chars)")
+        return text
+    except Exception as e:
+        print(f"[DeepSeek ERROR] {e}")
         return None
 
 
@@ -467,37 +527,40 @@ def _context_only_fallback(
         "sections": sections,
         "ollama_raw": "",
         "google_raw": "",
+        "deepseek_raw": "",  # ✓ NEW
         "model_used": "context-only",
     }
 
 
 # -------------------------------------------------------------------
-#  Main entry
+#  Main entry - UPDATED with model_mode parameter
 # -------------------------------------------------------------------
 
-def generate_detailed_response(user_query, retrieved_data):
+def generate_detailed_response(user_query, retrieved_data, model_mode="Google only"):
     """
     Generate response using retrieved documents with FULL detail display
-    ✓ Shows complete content from all documents
-    ✓ Displays image analysis in detail
-    ✓ Includes all metadata
+    ✅ Google is now the default model mode (changed from "Best (Google + Ollama)")
+    
+    Args:
+        user_query: User's question
+        retrieved_data: Retrieved documents from ChromaDB
+        model_mode: Which model to use - defaults to "Google only" ✅ UPDATED
+    
+    Returns:
+        dict: Response data with main response, key points, passages, etc.
     """
     
     print(f"\n{'='*70}")
-    print(f"[Response Generator] Processing query: {user_query}")
+    print(f"[Response Generator] Query: {user_query}")
+    print(f"[Response Generator] Model Mode: {model_mode}")
     print(f"{'='*70}")
     
-    # Get raw passages and ensure they have IDs
     passages = retrieved_data.get('passages', [])
     
-    print(f"[Response Generator] Retrieved {len(passages)} passages")
-    
-    # Ensure each passage has an 'id' field
     for idx, p in enumerate(passages):
         if 'id' not in p:
             p['id'] = f"P{idx + 1}"
         
-        # Debug: Print passage info
         source = p.get('source', 'Unknown')
         text_len = len(p.get('text', ''))
         has_images = p.get('has_images', False)
@@ -505,7 +568,7 @@ def generate_detailed_response(user_query, retrieved_data):
         
         print(f"   P{idx + 1}: {source} ({text_len} chars)")
         if has_images:
-            print(f"          📷 {image_count} images | Metadata: {p.get('metadata', {})}")
+            print(f"          🖼️ {image_count} images")
 
     # Extract URL content from passages using BeautifulSoup
     url_snippets = []
@@ -518,31 +581,27 @@ def generate_detailed_response(user_query, retrieved_data):
             if snippet:
                 url_snippets.append({"url": url, "text": snippet})
                 seen_urls.add(url)
-                print(f"[Response Generator] ✓ URL content fetched: {url}")
+                print(f"[Response Generator] ✅ URL content fetched: {url}")
 
-    print(f"[Response Generator] URL snippets: {len(url_snippets)}")
+    print(f"[Response Generator] URL snippets: {len(url_snippets)}\n")
     
-    # Build comprehensive context - KEEP ALL DETAILS
     context_parts = []
 
-    # Add document passages with COMPLETE content
     for idx, passage in enumerate(passages, 1):
         source = passage.get('source', 'Unknown')
         text = passage.get('text', '')
         passage_id = passage.get('id', f'P{idx}')
         
-        # Add metadata indicators
         metadata = passage.get('metadata', {})
         has_images = passage.get('has_images', False)
         image_count = passage.get('image_count', 0)
         doc_type = metadata.get('type', 'unknown')
         
-        # Build comprehensive passage header
         header = f"\n{'='*70}\n[{passage_id}] SOURCE: {source}\n"
         header += f"Type: {doc_type} | Content: {len(text)} chars\n"
         
         if has_images:
-            header += f"📷 Images: {image_count} (with vision analysis)\n"
+            header += f"🖼️ Images: {image_count} (with vision analysis)\n"
         
         if metadata:
             header += f"Metadata: {metadata}\n"
@@ -551,7 +610,6 @@ def generate_detailed_response(user_query, retrieved_data):
         
         context_parts.append(header + text)
 
-    # Add URL snippets
     for idx, item in enumerate(url_snippets, 1):
         context_parts.append(f"\n{'='*70}\n[URL{idx}] ({item['url']})\n{'='*70}\n{item['text']}")
 
@@ -560,20 +618,20 @@ def generate_detailed_response(user_query, retrieved_data):
     print(f"[Response Generator] Total context: {len(context)} chars")
     
     if not context or len(context) < 50:
-        print("[Response Generator] ⚠️ Context too short or empty!")
+        print("[Response Generator] ⚠️ Context too short!")
         return {
-            "main_response": "I don't have enough information to answer this question. Please upload documents.",
+            "main_response": "I don't have enough information to answer this question.",
             "key_points": [],
             "passages": passages,
             "sections": [],
             "google_raw": "",
             "ollama_raw": "",
+            "deepseek_raw": "",
             "model_used": "none",
-            "full_context": "",
+            "selected_model": model_mode,
             "retrieved_count": len(passages)
         }
     
-    # Build improved prompt that emphasizes detail
     prompt = f"""You are a finance expert assistant with access to comprehensive documents.
 
 IMPORTANT INSTRUCTIONS:
@@ -581,8 +639,7 @@ IMPORTANT INSTRUCTIONS:
 2. Extract MAXIMUM detail from the documents
 3. Reference specific passages (P1, P2, etc.) in your answer
 4. Include all relevant data, numbers, and details
-5. If documents contain images with analysis, incorporate that information
-6. Be comprehensive and thorough - don't summarize, provide full details
+5. Be comprehensive and thorough
 
 FULL DOCUMENT CONTENT:
 {context}
@@ -590,9 +647,8 @@ FULL DOCUMENT CONTENT:
 USER QUESTION: {user_query}
 
 REQUIREMENTS:
-- Answer based ONLY on the provided documents and context
+- Answer based ONLY on the provided documents
 - Be detailed and specific with all information
-- Quote or closely paraphrase relevant sections
 - Include all data points, numbers, and important details
 - If insufficient information, clearly state that
 
@@ -601,97 +657,96 @@ ANSWER FORMAT:
 [Comprehensive answer with all details]
 
 ## KEY DETAILS
-- Detail 1 (with source reference)
-- Detail 2 (with source reference)
-- Detail 3 (with source reference)
+- Detail 1
+- Detail 2
+- Detail 3
 
 ## SOURCES USED
 [List which passages were used]
 """
     
     print(f"[Response Generator] Prompt ready ({len(prompt)} chars)")
-    print(f"[Response Generator] Sending to LLM...\n")
+    print(f"[Response Generator] Model mode: {model_mode}\n")
     
-    # Call Google Gemini
     google_response = ""
-    google_raw = ""
-    
-    if google_client:
-        try:
-            print("[Response Generator] 📡 Calling Google Gemini...")
-            response = google_client.models.generate_content(
-                model=GOOGLE_MODEL,
-                contents=prompt
-            )
-            google_response = response.text if response else ""
-            google_raw = google_response
-            print(f"[Response Generator] ✓ Google response: {len(google_response)} chars\n")
-        except Exception as e:
-            print(f"[Response Generator] ✗ Google error: {e}\n")
-            google_response = f"Error: {str(e)}"
-    else:
-        print("[Response Generator] ✗ Google client not available\n")
-        google_response = "Google API not configured"
-    
-    # Call Ollama (optional)
     ollama_response = ""
-    ollama_raw = ""
+    deepseek_response = ""
     
-    try:
-        print("[Response Generator] 📡 Calling Ollama...")
-        r = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.3}
-            },
-            timeout=120
-        )
-        if r.status_code == 200:
-            ollama_response = r.json().get("response", "")
-            ollama_raw = ollama_response
-            print(f"[Response Generator] ✓ Ollama response: {len(ollama_response)} chars\n")
-        else:
-            print(f"[Response Generator] ✗ Ollama error: {r.status_code}\n")
-    except Exception as e:
-        print(f"[Response Generator] ⚠️ Ollama not available: {e}\n")
+    # ✅ UPDATED: Model selection logic with Google as default
+    if model_mode == "Google only":
+        print("[Response Generator] 🔵 Using Google only (DEFAULT)")
+        google_response = _call_google(prompt)
     
-    # Use Google response as main response
-    main_response = google_response or ollama_response or "No response generated"
+    elif model_mode == "Ollama only":
+        print("[Response Generator] 🟢 Using Ollama only")
+        ollama_response = _call_ollama(prompt)
     
-    # Extract key points
+    elif model_mode == "DeepSeek":
+        print("[Response Generator] 🔷 Using DeepSeek")
+        deepseek_response = _call_deepseek(prompt)
+    
+    elif model_mode == "Context-only":
+        print("[Response Generator] ⚪ Using Context-only")
+        return _context_only_fallback(user_query, passages)
+    
+    else:  # Best (Google + Ollama)
+        print("[Response Generator] 🟣 Using Best (Google + Ollama)")
+        google_response = _call_google(prompt)
+        ollama_response = _call_ollama(prompt)
+    
+    # Choose response with priority
+    main_response = (
+        deepseek_response
+        or google_response
+        or ollama_response
+        or "No response generated"
+    )
+    
     key_points = []
-    if main_response:
-        # Try to extract from KEY DETAILS section
-        if "## KEY DETAILS" in main_response:
-            lines = main_response.split("## KEY DETAILS")[1].split("##")[0].split("\n")
-            key_points = [line.strip() for line in lines if line.strip().startswith("-")]
+    if main_response and "## KEY DETAILS" in main_response:
+        lines = main_response.split("## KEY DETAILS")[1].split("##")[0].split("\n")
+        key_points = [line.strip() for line in lines if line.strip().startswith("-")]
+    else:
+        sentences = [s.strip() for s in main_response.split('.') if s.strip() and len(s.strip()) > 20]
+        key_points = sentences[:5]
+    
+    # Detect which model was actually used
+    if model_mode == "DeepSeek":
+        model_used = "deepseek"
+    elif model_mode == "Google only":
+        model_used = "google"
+    elif model_mode == "Ollama only":
+        model_used = "ollama"
+    elif model_mode == "Context-only":
+        model_used = "context-only"
+    else:  # Best
+        if deepseek_response:
+            model_used = "deepseek"
+        elif google_response and ollama_response:
+            model_used = "google+ollama"
+        elif google_response:
+            model_used = "google"
+        elif ollama_response:
+            model_used = "ollama"
         else:
-            # Fallback: extract sentences
-            sentences = [s.strip() for s in main_response.split('.') if s.strip() and len(s.strip()) > 20]
-            key_points = sentences[:5]
+            model_used = "none"
     
-    # Determine which model was used
-    model_used = "google" if google_response else "ollama" if ollama_response else "none"
-    
-    print(f"[Response Generator] ✓ Complete!")
-    print(f"[Response Generator] Model: {model_used}")
-    print(f"[Response Generator] Response length: {len(main_response)} chars")
-    print(f"[Response Generator] Key points: {len(key_points)}")
+    print(f"[Response Generator] ✅ Complete!")
+    print(f"[Response Generator] Model used: {model_used}")
     print(f"{'='*70}\n")
     
     return {
         "main_response": main_response,
         "key_points": key_points,
         "sections": _build_sections_from_passages(passages),
-        "google_raw": google_raw,
-        "ollama_raw": ollama_raw,
+        "google_raw": google_response,
+        "ollama_raw": ollama_response,
+        "deepseek_raw": deepseek_response,
         "model_used": model_used,
+        "selected_model": model_mode,
         "passages": passages,
         "url_summaries": url_snippets,
-        "full_context": context,  # Include full context
+        "full_context": context,
         "retrieved_count": len(passages),
         "total_context_chars": len(context)
     }
