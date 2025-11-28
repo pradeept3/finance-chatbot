@@ -17,7 +17,7 @@ st.set_page_config(
     page_title="Finance Chatbot",
     page_icon="💼",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # 👇 All other imports that use Streamlit come *after* set_page_config
