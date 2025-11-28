@@ -13,7 +13,7 @@ from utils.api_client import API_URL
 def upload_interface():
     """File upload interface with URL support"""
 
-    st.subheader("📤 Upload & Process Documents")
+    # st.subheader("📤 Upload & Process Documents")
 
     st.info(
         "📋 **Supported Formats:** PDF (with images), DOCX, XLSX, TXT, PNG, JPG, JPEG\n\n"
@@ -224,7 +224,7 @@ def upload_files_and_urls(uploaded_files, urls):
 def upload_interface():
     """File upload interface with proper processing"""
 
-    st.subheader("📤 Upload & Process Documents")
+    #st.subheader("📤 Upload & Process Documents")
 
     st.info(
         "📋 **Supported Formats:** PDF, DOCX, XLSX, TXT, PNG, JPG, JPEG\n\n"

@@ -295,7 +295,7 @@ def user_profile_sidebar():
 
 def admin_user_management():
     """Admin panel for user management"""
-    st.markdown("### 👥 User Management")
+    # st.markdown("### 👥 User Management")
     
     users = load_user_database()
     

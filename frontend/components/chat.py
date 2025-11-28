@@ -1,4 +1,4 @@
-# frontend/components/chat.py - COMPLETE WORKING VERSION
+# frontend/components/chat.py - USER-SPECIFIC MESSAGES & ADMIN ONLY DETAILS
 
 import streamlit as st
 import requests
@@ -44,16 +44,16 @@ def _generate_enhanced_next_steps(user_question: str, answer_text: str, key_poin
     })
     
     suggestions.append({
-        "label": "❓ Ask a related question",
-        "emoji": "❓",
+        "label": "🔍 Ask a related question",
+        "emoji": "🔍",
         "reason": "Dive deeper into related topics",
         "icon_color": "#06B6D4"
     })
     
     if len(user_question.strip()) < 40:
         suggestions.append({
-            "label": "🔍 Make question more specific",
-            "emoji": "🔍",
+            "label": "🎯 Make question more specific",
+            "emoji": "🎯",
             "reason": "Get more accurate answers",
             "icon_color": "#3B82F6"
         })
@@ -83,15 +83,33 @@ def _generate_enhanced_next_steps(user_question: str, answer_text: str, key_poin
     return suggestions[:6]
 
 
+def _get_user_messages_key():
+    """Get user-specific messages key"""
+    if st.session_state.get("authenticated"):
+        username = st.session_state.user.get("username", "guest")
+        return f"messages_{username}"
+    return "messages_guest"
+
+
+def _init_user_messages():
+    """Initialize user-specific messages"""
+    key = _get_user_messages_key()
+    if key not in st.session_state:
+        st.session_state[key] = []
+    
+    processing_key = f"processing_{key}"
+    if processing_key not in st.session_state:
+        st.session_state[processing_key] = False
+
+
 def chat_interface() -> None:
     """Chat interface with FAQ dropdown and persistent next steps"""
 
-    # Initialize session state
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+    # Initialize user-specific session state
+    _init_user_messages()
     
-    if "processing" not in st.session_state:
-        st.session_state.processing = False
+    messages_key = _get_user_messages_key()
+    processing_key = f"processing_{messages_key}"
 
     # Check document count
     try:
@@ -127,11 +145,11 @@ def chat_interface() -> None:
     with faq_col2:
         if st.button("🚀 Ask", key="faq_ask_btn", use_container_width=True, type="primary"):
             if selected_faq != "-- Select a question --":
-                st.session_state.messages.append({
+                st.session_state[messages_key].append({
                     "role": "user",
                     "content": selected_faq
                 })
-                st.session_state.processing = True
+                st.session_state[processing_key] = True
                 st.rerun()
     
     st.markdown("---")
@@ -139,16 +157,16 @@ def chat_interface() -> None:
     # ============================================================
     # CHAT HISTORY WITH NEXT STEPS
     # ============================================================
-    for msg_idx, message in enumerate(st.session_state.messages):
+    for msg_idx, message in enumerate(st.session_state[messages_key]):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             
             # Show next steps for assistant messages (except the one being processed)
-            if message["role"] == "assistant" and not st.session_state.processing:
+            if message["role"] == "assistant" and not st.session_state[processing_key]:
                 # Generate next steps for this message
                 prev_user_msg = ""
-                if msg_idx > 0 and st.session_state.messages[msg_idx - 1]["role"] == "user":
-                    prev_user_msg = st.session_state.messages[msg_idx - 1]["content"]
+                if msg_idx > 0 and st.session_state[messages_key][msg_idx - 1]["role"] == "user":
+                    prev_user_msg = st.session_state[messages_key][msg_idx - 1]["content"]
                 
                 next_steps = _generate_enhanced_next_steps(
                     user_question=prev_user_msg,
@@ -206,11 +224,11 @@ def chat_interface() -> None:
                                 use_container_width=True,
                                 type="secondary"
                             ):
-                                st.session_state.messages.append({
+                                st.session_state[messages_key].append({
                                     "role": "user",
                                     "content": label,
                                 })
-                                st.session_state.processing = True
+                                st.session_state[processing_key] = True
                                 st.rerun()
 
     # ============================================================
@@ -223,25 +241,22 @@ def chat_interface() -> None:
 
     # Process new input
     if user_input:
-        st.session_state.messages.append({
+        st.session_state[messages_key].append({
             "role": "user",
             "content": user_input,
         })
-        st.session_state.processing = True
+        st.session_state[processing_key] = True
         st.rerun()
 
     # ============================================================
     # PROCESS LAST MESSAGE IF NEEDED
     # ============================================================
-    if st.session_state.processing and len(st.session_state.messages) > 0:
-        last_msg = st.session_state.messages[-1]
+    if st.session_state[processing_key] and len(st.session_state[messages_key]) > 0:
+        last_msg = st.session_state[messages_key][-1]
         
         # Only process if last message is from user
         if last_msg["role"] == "user":
             user_query = last_msg["content"]
-            
-            with st.chat_message("user"):
-                st.markdown(user_query)
             
             # Get AI response
             with st.chat_message("assistant"):
@@ -258,7 +273,7 @@ def chat_interface() -> None:
                         error_msg = response_data.get("error", "Unknown error") if response_data else "No response"
                         with placeholder.container():
                             st.error(f"❌ Error: {error_msg}")
-                        st.session_state.processing = False
+                        st.session_state[processing_key] = False
                         return
 
                     # Get main response
@@ -267,7 +282,7 @@ def chat_interface() -> None:
                     if not main_response.strip():
                         with placeholder.container():
                             st.warning("⚠️ No response generated")
-                        st.session_state.processing = False
+                        st.session_state[processing_key] = False
                         return
 
                     # Clear placeholder
@@ -307,65 +322,88 @@ def chat_interface() -> None:
                             st.markdown(f"**{i}.** {point}")
                         st.divider()
 
-                    # URL Content
-                    url_summaries = response_data.get("url_summaries", [])
-                    if url_summaries:
-                        st.divider()
-                        st.markdown(f"### 🌐 Content from URLs ({len(url_summaries)} found)")
+                    # Check if user is admin BEFORE showing sensitive details
+                    is_admin = False
+                    if st.session_state.get("authenticated") and st.session_state.get("user"):
+                        is_admin = st.session_state.user.get("role") == "admin"
+                    
+                    # ============================================================
+                    # SHOW DETAILS ONLY TO ADMINS
+                    # ============================================================
+                    if is_admin:
+                        # Show URL details only to admin - ONLY if from uploaded documents
+                        passages = response_data.get("passages", []) or []
+                        document_urls = set()
                         
-                        for idx, url_data in enumerate(url_summaries, 1):
-                            st.markdown(f"#### 🔗 {idx}. {url_data.get('title', 'URL')}")
-                            st.markdown(f"**URL:** [{url_data['url']}]({url_data['url']})")
+                        # Collect URLs that are from uploaded documents (not external URLs)
+                        for p in passages:
+                            url = p.get("url")
+                            if url and url != "None":  # Only if URL exists in document metadata
+                                document_urls.add(url)
+                        
+                        # Show URL content only for document-based URLs
+                        url_summaries = response_data.get("url_summaries", [])
+                        if url_summaries:
+                            # Filter to only show URLs from documents
+                            document_url_summaries = [u for u in url_summaries if u.get("url") in document_urls]
                             
-                            if url_data.get('error'):
-                                st.error(f"❌ Error: {url_data['error']}")
-                            else:
-                                content = url_data.get('text', '')
-                                if content:
-                                    preview = content[:500] + ("..." if len(content) > 500 else "")
-                                    st.info(f"**Preview:** {preview}")
-                                    
-                                    show_full = st.checkbox(
-                                        f"📄 Show Full Content",
-                                        key=f"show_url_{idx}"
-                                    )
-                                    
-                                    if show_full:
-                                        st.text_area(
-                                            "Full Content",
-                                            value=content,
-                                            height=300,
-                                            key=f"url_content_{idx}",
-                                            disabled=True
-                                        )
-                            st.markdown("---")
-
-                    # Sources
-                    passages = response_data.get("passages", []) or []
-                    if passages:
-                        with st.expander(f"📚 Sources ({len(passages)} passages)", expanded=False):
-                            for idx, p in enumerate(passages[:8], start=1):
-                                source = p.get("source", "Unknown")
-                                distance = p.get("distance")
-                                text = (p.get("text") or "").strip()
-
-                                if isinstance(distance, (int, float)):
-                                    if distance <= 0.6:
-                                        relevance = "🔴 High"
-                                    elif distance <= 1.0:
-                                        relevance = "🟡 Medium"
-                                    else:
-                                        relevance = "🟢 Low"
-                                else:
-                                    relevance = "❓ Unknown"
-
-                                st.markdown(f"**{idx}. {source}** – {relevance}")
-                                snippet = text[:300] + "..." if len(text) > 300 else text
-                                st.code(snippet, language="text")
+                            if document_url_summaries:
                                 st.divider()
+                                st.markdown(f"### 🌐 Content from Document URLs ({len(document_url_summaries)} found)")
+                                
+                                for idx, url_data in enumerate(document_url_summaries, 1):
+                                    st.markdown(f"#### 🔗 {idx}. {url_data.get('title', 'URL')}")
+                                    st.markdown(f"**URL:** [{url_data['url']}]({url_data['url']})")
+                                    
+                                    if url_data.get('error'):
+                                        st.error(f"❌ Error: {url_data['error']}")
+                                    else:
+                                        content = url_data.get('text', '')
+                                        if content:
+                                            preview = content[:500] + ("..." if len(content) > 500 else "")
+                                            st.info(f"**Preview:** {preview}")
+                                            
+                                            show_full = st.checkbox(
+                                                f"📄 Show Full Content",
+                                                key=f"show_url_{idx}"
+                                            )
+                                            
+                                            if show_full:
+                                                st.text_area(
+                                                    "Full Content",
+                                                    value=content,
+                                                    height=300,
+                                                    key=f"url_content_{idx}",
+                                                    disabled=True
+                                                )
+                                    st.markdown("---")
+
+                        # Show source details only to admin
+                        passages = response_data.get("passages", []) or []
+                        if passages:
+                            with st.expander(f"📚 Sources ({len(passages)} passages)", expanded=False):
+                                for idx, p in enumerate(passages[:8], start=1):
+                                    source = p.get("source", "Unknown")
+                                    distance = p.get("distance")
+                                    text = (p.get("text") or "").strip()
+
+                                    if isinstance(distance, (int, float)):
+                                        if distance <= 0.6:
+                                            relevance = "🔴 High"
+                                        elif distance <= 1.0:
+                                            relevance = "🟡 Medium"
+                                        else:
+                                            relevance = "🟢 Low"
+                                    else:
+                                        relevance = "⚪ Unknown"
+
+                                    st.markdown(f"**{idx}. {source}** – {relevance}")
+                                    snippet = text[:300] + "..." if len(text) > 300 else text
+                                    st.code(snippet, language="text")
+                                    st.divider()
 
                     # Save assistant response
-                    st.session_state.messages.append({
+                    st.session_state[messages_key].append({
                         "role": "assistant",
                         "content": main_response,
                     })
@@ -373,7 +411,7 @@ def chat_interface() -> None:
                     st.success("✅ Response complete")
                     
                     # Mark processing as complete
-                    st.session_state.processing = False
+                    st.session_state[processing_key] = False
                     
                     # Rerun to show next steps in history
                     st.rerun()
@@ -386,12 +424,12 @@ def chat_interface() -> None:
                     with placeholder.container():
                         st.error(f"❌ Error: {str(e)}")
                     
-                    st.session_state.processing = False
+                    st.session_state[processing_key] = False
     
     # ============================================================
     # FOOTER - ALWAYS VISIBLE
     # ============================================================
-    if len(st.session_state.messages) > 0:
+    if len(st.session_state[messages_key]) > 0:
         st.markdown("---")
         
         footer_cols = st.columns(3)
@@ -399,7 +437,7 @@ def chat_interface() -> None:
         with footer_cols[0]:
             if st.button("📋 Export Chat", key="export_chat_footer", use_container_width=True):
                 chat_text = "Finance Chatbot - Chat History\n" + "="*60 + "\n\n"
-                for i, msg in enumerate(st.session_state.messages, 1):
+                for i, msg in enumerate(st.session_state[messages_key], 1):
                     role = "👤 USER" if msg["role"] == "user" else "🤖 ASSISTANT"
                     chat_text += f"[{i}] {role}:\n{msg['content']}\n\n"
                 
@@ -412,10 +450,10 @@ def chat_interface() -> None:
                 )
         
         with footer_cols[1]:
-            if st.button("🔄 Clear Chat", key="clear_chat_footer", use_container_width=True):
-                st.session_state.messages = []
-                st.session_state.processing = False
+            if st.button("📄 Clear Chat", key="clear_chat_footer", use_container_width=True):
+                st.session_state[messages_key] = []
+                st.session_state[processing_key] = False
                 st.rerun()
         
         with footer_cols[2]:
-            st.metric("💬 Messages", len(st.session_state.messages))
+            st.metric("💬 Messages", len(st.session_state[messages_key]))
