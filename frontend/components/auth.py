@@ -7,10 +7,16 @@ import hashlib
 import json
 import os
 from datetime import datetime
+import base64
+
+def load_base64_image(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode()
 
 # User database file path
 USER_DB_PATH = "user_database.json"
 
+image_path = os.path.join(os.path.dirname(__file__), "..", "static", "Santa Clara University.png")
 # Default users (Admin and some students)
 DEFAULT_USERS = {
     "admin": {
@@ -140,10 +146,19 @@ def change_password(username, old_password, new_password):
 
 def login_page():
     """Display login page"""
+    image_file = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "static", "scu_logo.png")
+    )
+
+    encoded_image = load_base64_image(image_file)
+
     st.markdown(
-        """
+        f"""
         <div style="text-align: center; padding: 2rem 0;">
-            <h1 style="font-size: 3rem; margin-bottom: 0.5rem;">🔐</h1>
+            <h1 style="font-size: 3rem; margin-bottom: 0.5rem;">
+                <img src="data:image/png;base64,{encoded_image}" 
+                     style="height: 3rem;">
+            </h1>
             <h2 style="color: #667eea; margin-bottom: 0.5rem;">Finance Chatbot Login</h2>
             <p style="color: #64748b; font-size: 1.1rem;">Please sign in to continue</p>
         </div>
@@ -157,7 +172,7 @@ def login_page():
     with col2:
         st.markdown(
             """
-            <div style="background: white; padding: 2rem; border-radius: 16px; 
+            <div style="background: #b30738; padding: 2rem; border-radius: 16px; 
                         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1); border: 2px solid #e0e7ff;">
             </div>
             """,

@@ -10,5 +10,17 @@
         "role": "student",
         "name": "John Doe",
         "email": "john@student.com"
+    },
+    "pradeep": {
+        "password": "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3",
+        "role": "student",
+        "name": "pradeep tripathy",
+        "email": "ptripathy@scu.edu"
+    },
+    "Triveni": {
+        "password": "f6b6d0d62eb661c6d3fd7e35e972a8ed44b4aa2fd6c87b449b82b1b7b1a2319f",
+        "role": "student",
+        "name": "Triveni Racha",
+        "email": "tracha@scu.edu"
     }
 }
