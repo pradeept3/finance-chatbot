@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "finance-chatbot"
+version = "1.0.0"
+description = "A Finance Chatbot application with Streamlit frontend, FastAPI backend, ChromaDB vector search, and document analysis tools."
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    { name = "Pradeep Kumar Tripathy", email = "your_email@example.com" }
+]
+
+# -------------------------
+# Project Dependencies
+# -------------------------
+dependencies = [
+    "streamlit>=1.32",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "chromadb>=0.5",
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "python-dotenv>=1.0",
+    "PyPDF2>=3.0",
+    "openpyxl>=3.1",
+    "Pillow>=10.0",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "requests>=2.31",
+    "langchain>=0.1",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+    "tiktoken>=0.5",
+    "protobuf>=4.24"
+]
+
+# -------------------------
+# CLI Entrypoint
+# -------------------------
+[project.scripts]
+finance-chatbot = "frontend.streamlit_app:main"
+
+# -------------------------
+# Include non-Python assets
+# -------------------------
+[tool.setuptools.package-data]
+"frontend" = [
+    "static/*",
+    "components/*.png",
+    "components/*.jpg",
+    "components/*.jpeg",
+    "components/*.json"
+]
+
+"backend" = [
+    "uploaded_documents/*",
+    "chroma_db/*",
+    "data/finance_docs/*"
+]
+
+# -------------------------
+# Find all modules
+# -------------------------
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*", "dist*", "build*"]
