@@ -3,31 +3,23 @@ name: Publish package to PyPI
 on:
   push:
     tags:
-      - "v*"   # Push a tag like v1.0.0 to publish
+      - "v*"
 
 jobs:
   build:
-    name: Build finance-chatbot package
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Install build tools
-        run: |
-          pip install --upgrade pip
-          pip install build
+      - run: pip install build
 
       - name: Build package
-        run: |
-          python -m build
-          ls -R dist/
+        run: python -m build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -36,22 +28,20 @@ jobs:
           path: dist/
 
   publish:
-    name: Publish to PyPI
-    runs-on: ubuntu-latest
     needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
     permissions:
-      id-token: write   # REQUIRED for Trusted Publishing
+      id-token: write
       contents: read
 
-    environment:
-      name: pypi        # Must match what you configured on PyPI
-
     steps:
-      - name: Download built artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
 
-      - name: Publish package to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@v1.8.10
