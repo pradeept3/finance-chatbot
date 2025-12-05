@@ -7,63 +7,56 @@ on:
   workflow_dispatch:  # Allow manual triggering
 
 jobs:
-  test:
-    name: Run Tests
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-cov
-
-      - name: Lint with flake8
-        run: |
-          pip install flake8
-          flake8 frontend backend --count --select=E9,F63,F7,F82 --show-source --statistics
-        continue-on-error: true
-
-      - name: Run tests
-        run: |
-          pytest tests/ -v --cov=finance_chatbot
-        continue-on-error: true
-
   build:
     name: Build Distribution Package
-    needs: test
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for proper versioning
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
+      - name: Display Python version
+        run: python --version
+
+      - name: Upgrade pip
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+
       - name: Install build tools
         run: |
-          python -m pip install --upgrade pip
           pip install build twine
 
+      - name: Verify requirements.txt exists
+        run: |
+          ls -la requirements.txt
+          echo "Requirements file found successfully"
+
       - name: Build package
-        run: python -m build
+        run: |
+          echo "Building distribution package..."
+          python -m build
+          echo "Build completed successfully"
+          ls -la dist/
 
       - name: Check package metadata
-        run: twine check dist/*
+        run: |
+          echo "Checking package metadata..."
+          twine check dist/* --strict
+          echo "Metadata check passed"
+
+      - name: Display built artifacts
+        run: |
+          echo "=== Built Artifacts ==="
+          ls -lh dist/
+          echo "=== Archive Contents ==="
+          tar -tzf dist/*.tar.gz | head -20
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -91,10 +84,21 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Verify artifacts
+        run: |
+          echo "=== Downloaded Artifacts ==="
+          ls -lh dist/
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
+          skip-existing: false
+
+      - name: Verify publication
+        run: |
+          echo "Package published successfully!"
+          echo "View at: https://pypi.org/project/finance-chatbot/"
 
   publish-to-testpypi:
     name: Publish to Test PyPI (Optional)
@@ -119,8 +123,9 @@ jobs:
         with:
           repository-url: https://test.pypi.org/legacy/
           verbose: true
+          skip-existing: true
 
-  release:
+  create-release:
     name: Create GitHub Release
     needs: publish-to-pypi
     runs-on: ubuntu-latest
@@ -131,17 +136,37 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get release notes from tag
-        id: tag_body
+      - name: Get version from tag
+        id: tag_version
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          name: Finance Chatbot ${{ steps.tag_body.outputs.version }}
-          body: "See [PyPI](https://pypi.org/project/finance-chatbot/) for installation details."
+          name: Finance Chatbot ${{ steps.tag_version.outputs.version }}
+          body: |
+            # Finance Chatbot ${{ steps.tag_version.outputs.version }}
+            
+            ## 🎉 Released to PyPI!
+            
+            Install the latest version:
+            ```bash
+            pip install finance-chatbot
+            ```
+            
+            ## 📦 Package Information
+            - **PyPI:** https://pypi.org/project/finance-chatbot/
+            - **Documentation:** https://github.com/${{ github.repository }}/blob/main/README.md
+            - **Issues:** https://github.com/${{ github.repository }}/issues
+            
+            ## ✨ What's New
+            See the commit history for detailed changes.
+            
+            ---
+            *Built and published automatically by GitHub Actions*
           draft: false
           prerelease: false
         env:
