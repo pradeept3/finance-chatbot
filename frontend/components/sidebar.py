@@ -113,18 +113,18 @@ def render_sidebar():
     )
 
     # Display current API configuration
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📡 API Status")
+    # st.sidebar.markdown("---")
+    # st.sidebar.markdown("### 📡 API Status")
     
-    import os
-    from dotenv import load_dotenv
+    # import os
+    # from dotenv import load_dotenv
     
-    load_dotenv()
+    # load_dotenv()
     
-    google_key = "✅ Configured" if os.getenv("GOOGLE_API_KEY") else "❌ Not set"
-    deepseek_key = "✅ Configured" if os.getenv("DEEPSEEK_API_KEY") else "❌ Not set"
-    ollama_url = "✅ Available" if os.getenv("OLLAMA_API_URL") else "❌ Not set"
+    # google_key = "✅ Configured" if os.getenv("GOOGLE_API_KEY") else "❌ Not set"
+    # deepseek_key = "✅ Configured" if os.getenv("DEEPSEEK_API_KEY") else "❌ Not set"
+    # ollama_url = "✅ Available" if os.getenv("OLLAMA_API_URL") else "❌ Not set"
     
-    st.sidebar.metric("Google API", google_key)
-    st.sidebar.metric("DeepSeek API", deepseek_key)
-    st.sidebar.metric("Ollama", ollama_url)
+    # st.sidebar.metric("Google API", google_key)
+    # st.sidebar.metric("DeepSeek API", deepseek_key)
+    # st.sidebar.metric("Ollama", ollama_url)

@@ -201,6 +201,7 @@ def get_status():
 # -----------------------------------------------------------------------------
 # ✅ UPDATED: Chat endpoint with URL fetching
 # -----------------------------------------------------------------------------
+# Updated Chat endpoint with proper error handling
 @app.route("/api/chat", methods=["POST"])
 def chat():
     try:
@@ -210,10 +211,12 @@ def chat():
         user_query = user_query.strip()
         
         model_mode = data.get("model_mode", "Best (Google + Ollama)")
+        context_passages = data.get("context_passages")  # NEW: Get context passages
         
         print(f"\n{'='*70}")
         print(f"[Chat] Received query: {user_query}")
         print(f"[Chat] Model mode: {model_mode}")
+        print(f"[Chat] Context passages: {len(context_passages) if context_passages else 0}")
         print(f"{'='*70}")
 
         if not user_query:
@@ -228,54 +231,85 @@ def chat():
                 "response": "System error: Database not initialized.",
             }), 500
 
-        # ✅ NEW: Check for URLs in the query and fetch them
+        # Check for URLs in the query and fetch them
         url_contents = detect_and_fetch_urls(user_query)
         
         if url_contents:
             print(f"[Chat] Fetched content from {len(url_contents)} URLs")
             
-            # Add URL content to the query context
             url_context = "\n\n=== CONTENT FROM PROVIDED URLs ===\n\n"
             for idx, url_data in enumerate(url_contents, 1):
                 url_context += f"[Source {idx}] {url_data['title']}\n"
                 url_context += f"URL: {url_data['url']}\n"
                 url_context += f"Content: {url_data['text']}\n\n"
             
-            # Prepend URL context to query for the LLM
             enhanced_query = f"{url_context}\n\nUser Question: {user_query}"
         else:
             enhanced_query = user_query
             url_context = ""
 
-        # Query ChromaDB
-        print("[Chat] Querying ChromaDB...")
-        retrieved_data = query_documents(collection, user_query, n_results=5)
+        # ============================================================
+        # CONDITIONAL SEARCH LOGIC (NEW)
+        # ============================================================
+        print("[Chat] Determining search strategy...")
         
-        print(f"[Chat] Retrieved {len(retrieved_data.get('passages', []))} passages")
+        if context_passages and len(context_passages) > 0:
+            # CONSTRAINED SEARCH: Search only within provided passages
+            print(f"[Chat] ✅ Using CONSTRAINED search ({len(context_passages)} passages)")
+            retrieved_data = {"passages": context_passages}
+            is_constrained = True
+        else:
+            # FULL SEARCH: Search all documents
+            print("[Chat] ✅ Using FULL search (all documents)")
+            retrieved_data = query_documents(collection, user_query, n_results=5)
+            is_constrained = False
+        
+        # Check if we got results
+        passages = retrieved_data.get("passages", [])
+        if not passages:
+            print("[Chat] No relevant passages found")
+            return jsonify({
+                "response": "No relevant information found. Try rephrasing your question.",
+                "key_points": [],
+                "passages": [],
+                "model_used": "none",
+                "selected_model": model_mode,
+                "url_summaries": url_contents,
+                "is_constrained": is_constrained,
+                "timestamp": datetime.now().isoformat(),
+                "status": "success",
+            }), 200
+        
+        print(f"[Chat] Retrieved {len(passages)} passages")
 
-        # Generate response with enhanced query
+        # Generate response with passages
         print("[Chat] Generating response...")
         response_data = generate_detailed_response(
-            user_query=enhanced_query,  # ✅ Use enhanced query with URL content
+            user_query=enhanced_query,
             retrieved_data=retrieved_data,
             model_mode=model_mode
         )
+        
+        # Ensure passages are in response_data
+        if "passages" not in response_data:
+            response_data["passages"] = passages
         
         print(f"[Chat] Response generated ({len(response_data.get('main_response', ''))} chars)")
         print(f"[Chat] Model used: {response_data.get('model_used', 'unknown')}")
         print(f"{'='*70}\n")
 
         return jsonify({
-            "response": response_data["main_response"],
-            "key_points": response_data["key_points"],
+            "response": response_data.get("main_response", ""),
+            "key_points": response_data.get("key_points", []),
             "sections": response_data.get("sections", []),
             "google_raw": response_data.get("google_raw", ""),
             "ollama_raw": response_data.get("ollama_raw", ""),
             "openai_raw": response_data.get("openai_raw", ""),
-            "model_used": response_data["model_used"],
+            "model_used": response_data.get("model_used", "unknown"),
             "selected_model": response_data.get("selected_model", model_mode),
-            "passages": response_data["passages"],
-            "url_summaries": url_contents,  # ✅ Include fetched URLs
+            "passages": response_data.get("passages", passages),
+            "url_summaries": url_contents,
+            "is_constrained": is_constrained,
             "timestamp": datetime.now().isoformat(),
             "status": "success",
         }), 200
@@ -289,7 +323,9 @@ def chat():
         return jsonify({
             "error": str(e), 
             "response": "An error occurred while processing your request.",
-            "status": "error"
+            "status": "error",
+            "passages": [],
+            "key_points": []
         }), 500
 
 
