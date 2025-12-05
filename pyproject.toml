@@ -25,7 +25,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",
     "Intended Audience :: Education",
-    "License :: OSI Approved :: MIT License",
     "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -69,7 +68,6 @@ dev = [
     "pytest-cov>=4.0",
     "black>=23.0",
     "flake8>=6.0",
-    "mypy>=1.0",
 ]
 
 [project.urls]
@@ -79,19 +77,8 @@ Repository = "https://github.com/pradeept3/finance-chatbot.git"
 Issues = "https://github.com/pradeept3/finance-chatbot/issues"
 
 [tool.setuptools]
-packages = ["finance_chatbot", "frontend", "backend", "utils"]
+packages = ["frontend", "backend"]
 
 [tool.setuptools.package-data]
-finance_chatbot = [
-    "static/*",
-    "templates/*",
-]
-
-[tool.black]
-line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-addopts = "--cov=finance_chatbot --cov-report=html"
+frontend = ["**/*"]
+backend = ["**/*"]
