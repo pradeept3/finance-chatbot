@@ -38,6 +38,7 @@ pip install -r requirements.txt
 
 4. Running the Application
     
+  ```python
   Start Backend Server
     Open Terminal/ Command prompt:
     Goto the finance-chatbot folder and type cd backend
@@ -47,6 +48,7 @@ pip install -r requirements.txt
     Goto the finance-chatbot folder and type cd frontend
     streamlit run main.py
     Frontend runs on: http://localhost:8501
+  ```
 
 5. Checklist Before Deployment
 
