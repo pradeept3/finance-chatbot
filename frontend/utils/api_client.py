@@ -1,114 +1,180 @@
+# frontend/utils/api_client.py - UPDATED FOR GOOGLE DEFAULT
+
 import requests
 import streamlit as st
 
-# ✅ IMPORTANT: Backend runs on port 5000, not 5001
-API_URL = "http://localhost:5000"
+# Backend API URL
+API_URL = "http://127.0.0.1:5000"
 
 
-@st.cache_data(ttl=300)
-def get_backend_status():
-    """Return full backend status JSON, or None on error."""
+def check_backend(timeout=5):
+    """Check if backend is running"""
     try:
-        resp = requests.get(f"{API_URL}/api/status", timeout=5)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return None
-
-
-def check_backend() -> bool:
-    """Quick health-check used to gate the app."""
-    try:
-        resp = requests.get(f"{API_URL}/api/health", timeout=5)
-        return resp.status_code == 200
-    except Exception:
+        response = requests.get(f"{API_URL}/api/status", timeout=timeout)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
         return False
 
 
-def send_message(message: str):
-    """Send a chat message to the backend /api/chat endpoint."""
+def get_document_count():
+    """Get total document count from backend"""
     try:
-        resp = requests.post(
-            f"{API_URL}/api/chat",
-            json={"message": message},
-            timeout=60,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            try:
-                err = resp.json().get("error", resp.text)
-            except Exception:
-                err = resp.text
-            st.error(f"Backend error: {err}")
-            return None
-    except requests.Timeout:
-        st.error("⏰ Request timeout. Please try again.")
-        return None
+        response = requests.get(f"{API_URL}/api/documents", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("total_documents", 0)
+        return 0
     except Exception as e:
-        st.error(f"⚠️ Error talking to backend: {e}")
-        return None
+        print(f"[Error] Failed to get document count: {e}")
+        return 0
+
+
+def send_message(query, use_google=True, use_ollama=False):
+    """Send chat message to backend"""
+    try:
+        print(f"[API Client] Sending query: {query[:50]}...")
+        
+        # ✅ UPDATED: Get model_mode from sidebar with Google default
+        model_mode = st.session_state.get("model_mode", "Google only")  # ✅ CHANGED
+        print(f"[API Client] Model mode: {model_mode}")
+        
+        # Send model_mode to backend
+        response = requests.post(
+            f"{API_URL}/api/chat",
+            json={
+                "message": query,
+                "model_mode": model_mode,
+                "use_google": use_google,
+                "use_ollama": use_ollama
+            },
+            timeout=120
+        )
+        
+        print(f"[API Client] Status code: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"[API Client] Model used: {data.get('model_used', 'unknown')}")
+            print(f"[API Client] Response keys: {list(data.keys())}")
+            return data
+        else:
+            error_text = response.text[:200] if response.text else "No error message"
+            print(f"[API Client] Error response: {error_text}")
+            return {
+                "error": f"Backend returned status {response.status_code}",
+                "response": f"Error: {error_text}"
+            }
+    except requests.exceptions.Timeout:
+        print("[API Client] Request timeout")
+        return {
+            "error": "Request timeout",
+            "response": "The request took too long. Please try again."
+        }
+    except requests.exceptions.ConnectionError:
+        print("[API Client] Connection error")
+        return {
+            "error": "Connection error",
+            "response": "Cannot connect to backend. Please ensure the backend server is running."
+        }
+    except Exception as e:
+        print(f"[API Client] Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": str(e),
+            "response": f"An error occurred: {str(e)}"
+        }
 
 
 def upload_files(files):
-    """
-    Upload multiple files to /api/upload.
-
-    `files` is expected to be a list of `UploadedFile` from st.file_uploader.
-    """
+    """Upload files to backend"""
     try:
-        file_tuples = []
-        for f in files:
-            file_tuples.append(
-                (
-                    "files",
-                    (f.name, f.read(), f.type or "application/octet-stream"),
-                )
+        files_data = []
+        for file in files:
+            file.seek(0)
+            files_data.append(
+                ('files', (file.name, file.getvalue(), file.type))
             )
-
-        resp = requests.post(f"{API_URL}/api/upload", files=file_tuples, timeout=120)
-
-        if resp.status_code == 200:
-            return resp.json()
+        
+        response = requests.post(
+            f"{API_URL}/api/upload",
+            files=files_data,
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            return response.json()
         else:
-            try:
-                err = resp.json().get("error", resp.text)
-            except Exception:
-                err = resp.text
-            st.error(f"Upload error: {err}")
-            return None
-    except requests.Timeout:
-        st.error("⏰ Upload timeout. Try smaller files or fewer at once.")
-        return None
+            return {
+                "error": f"Upload failed with status {response.status_code}"
+            }
     except Exception as e:
-        st.error(f"Upload error: {e}")
-        return None
+        return {
+            "error": str(e)
+        }
 
 
-@st.cache_data(ttl=60)
-def get_document_count() -> int:
-    """Get total document count from /api/documents."""
+def analyze_file(file, use_google=True, use_ollama=False):
+    """Analyze a single file"""
     try:
-        resp = requests.get(f"{API_URL}/api/documents", timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            return int(data.get("total_documents", 0))
-    except Exception:
-        pass
-    return 0
+        file.seek(0)
+        
+        files = {
+            'file': (file.name, file.getvalue(), file.type)
+        }
+        
+        data = {
+            'use_google': str(use_google).lower(),
+            'use_ollama': str(use_ollama).lower()
+        }
+        
+        response = requests.post(
+            f"{API_URL}/api/analyze-file",
+            files=files,
+            data=data,
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {
+                "error": f"Analysis failed with status {response.status_code}"
+            }
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
 
-# 🔽 ADD THIS NEW FUNCTION NEAR THE BOTTOM
-# def send_email(subject: str, body: str) -> dict:
-#     """Call backend to send an email via Agno EmailTools agent."""
-#     try:
-#         resp = requests.post(
-#             f"{API_URL}/api/send-email",
-#             json={"subject": subject, "body": body},
-#             timeout=20,
-#         )
-#         if resp.status_code == 200:
-#             return resp.json()
-#         return {"sent": False, "error": f"HTTP {resp.status_code}"}
-#     except Exception as e:
-#         return {"sent": False, "error": str(e)}
+
+def get_ai_status():
+    """Get AI services status"""
+    try:
+        response = requests.get(f"{API_URL}/api/ai-status", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "google_api": "error",
+            "ollama": "error"
+        }
+    except Exception as e:
+        print(f"[Error] Failed to get AI status: {e}")
+        return {
+            "google_api": "error",
+            "ollama": "error"
+        }
+
+
+def clear_documents():
+    """Clear all documents from database"""
+    try:
+        response = requests.post(f"{API_URL}/api/clear-documents", timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "error": f"Failed with status {response.status_code}"
+        }
+    except Exception as e:
+        return {
+            "error": str(e)
+        }

@@ -1,19 +1,8 @@
-# backend/next_steps_graph.py
 """
-Lightweight 'next steps' helper with **no LangGraph / LangChain / LLM calls**.
+backend/next_steps_graph.py
 
-This keeps the same public function:
-    run_next_steps_graph(user_question, answer_text, key_points=None)
-
-and returns:
-    {
-        "suggestions": [ { "label": ..., "category": ..., "reason": ... }, ... ],
-        "error": None or str
-    }
-
-So any existing Flask route that imports and calls run_next_steps_graph
-will continue to work, but will now be **instant** and cannot time out
-due to an LLM call.
+Simple rule-based "next steps" suggester for the finance chatbot.
+No LangChain / LangGraph dependencies – fast and robust.
 """
 
 from __future__ import annotations
@@ -21,71 +10,90 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional
 
 
-def _basic_suggestions(
-    user_question: str,
-    answer_text: str,
-    key_points: Optional[List[str]] = None,
+def _normalize(text: str) -> str:
+    """Lowercase + strip helper."""
+    return (text or "").lower().strip()
+
+
+def _build_generic_suggestions(
+    user_q: str,
+    answer: str,
+    key_points: List[str],
 ) -> List[Dict[str, Any]]:
     """
-    Very simple heuristic next-step generator.
+    Return 3–5 generic but useful next-step suggestions.
 
-    No external API calls. You can tweak these rules as you like.
+    Each suggestion has:
+      - label: button text
+      - category: followup | clarification | deep_dive | action
+      - reason: why this is a good next step
     """
-    key_points = key_points or []
     suggestions: List[Dict[str, Any]] = []
 
-    # 1️⃣ Generic follow-up question
     suggestions.append(
         {
-            "label": "Provide follow-up question",
-            "category": "followup",
-            "reason": "You can get deeper insights by asking a follow-up question about any part of the answer.",
+            "label": "Ask for a simpler explanation",
+            "category": "clarification",
+            "reason": (
+                "Use this if any part of the answer feels complex and you want a "
+                "more intuitive or beginner-friendly explanation."
+            ),
         }
     )
 
-    # 2️⃣ If the answer is long, offer a shorter summary
-    if len(answer_text) > 700 or len(key_points) > 4:
+    if user_q:
         suggestions.append(
             {
-                "label": "Request a shorter summary",
-                "category": "clarification",
-                "reason": "The answer is fairly detailed. A shorter summary may help you review the key ideas quickly.",
+                "label": "Apply this to my situation",
+                "category": "deep_dive",
+                "reason": (
+                    "Ask the assistant to adapt the answer to your specific context, "
+                    "project, or dataset."
+                ),
             }
         )
 
-    # 3️⃣ If there are key points, offer a deep-dive
     if key_points:
         suggestions.append(
             {
-                "label": "Deep dive into one key point",
+                "label": "Explain each key point with an example",
                 "category": "deep_dive",
-                "reason": "You can focus on one of the key topics to understand it in greater detail.",
+                "reason": (
+                    "Walk through concrete examples for the key takeaways so they are "
+                    "easier to understand and remember."
+                ),
             }
         )
 
-    # 4️⃣ If the question mentions 'requirements', 'plan', or 'steps', offer an action-oriented suggestion
-    q_lower = (user_question or "").lower()
-    if any(word in q_lower for word in ["requirement", "requirements", "plan", "steps"]):
-        suggestions.append(
-            {
-                "label": "Create an action plan",
-                "category": "action",
-                "reason": "You might want to convert these details into a concrete checklist or plan.",
-            }
-        )
+    suggestions.append(
+        {
+            "label": "List risks or limitations",
+            "category": "followup",
+            "reason": (
+                "Use this to uncover caveats, edge cases, or limitations related to "
+                "the answer."
+            ),
+        }
+    )
 
-    # 5️⃣ Fallback: ensure at least one suggestion
-    if not suggestions:
-        suggestions.append(
-            {
-                "label": "Ask for more clarification",
-                "category": "clarification",
-                "reason": "If anything in the answer is unclear, you can request further clarification.",
-            }
-        )
+    suggestions.append(
+        {
+            "label": "Suggest related topics to explore next",
+            "category": "action",
+            "reason": (
+                "Ask for a short list of related topics you could investigate to go "
+                "deeper in this area."
+            ),
+        }
+    )
 
-    # Limit to a maximum of 5 suggestions
-    return suggestions[:5]
+    # Deduplicate by label and limit to 5
+    unique: Dict[str, Dict[str, Any]] = {}
+    for s in suggestions:
+        if s["label"] not in unique:
+            unique[s["label"]] = s
+
+    return list(unique.values())[:5]
 
 
 def run_next_steps_graph(
@@ -94,33 +102,26 @@ def run_next_steps_graph(
     key_points: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Public function used by Flask.
+    Public entry point used by Flask /api/next-steps.
 
-    Previously this called a LangGraph + LLM pipeline. Now it is a fast,
-    local function that returns heuristic suggestions and **never** calls
-    Ollama or Gemini.
-
-    Example return:
+    Returns:
         {
-            "suggestions": [
-                {"label": "...", "category": "followup", "reason": "..."},
-                ...
-            ],
-            "error": None
+          "suggestions": [ { "label", "category", "reason" }, ... ],
+          "error": None | str
         }
     """
     try:
-        suggestions = _basic_suggestions(
-            user_question=user_question,
-            answer_text=answer_text,
-            key_points=key_points or [],
-        )
+        user_q_norm = _normalize(user_question)
+        answer_norm = _normalize(answer_text)
+        kp_list = key_points or []
+
+        suggestions = _build_generic_suggestions(user_q_norm, answer_norm, kp_list)
+
         return {
             "suggestions": suggestions,
             "error": None,
         }
     except Exception as e:
-        # Extremely unlikely, but we keep the shape for safety
         return {
             "suggestions": [],
             "error": str(e),

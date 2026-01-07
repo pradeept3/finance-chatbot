@@ -11,3 +11,7 @@ maxUploadSize = 50
 
 [logger]
 level = "error"
+
+[server]
+enableStaticServing = true
+

@@ -1,0 +1,49 @@
+# ============================================================
+# Finance Chatbot - Python Dependencies
+# ============================================================
+
+# Frontend - Streamlit
+streamlit==1.28.1
+streamlit-option-menu==0.3.6
+
+# Backend - Flask
+Flask==2.3.0
+Flask-CORS==4.0.0
+
+# Environment & Configuration
+python-dotenv==1.0.0
+
+# Vector Database & Embeddings
+chromadb==1.3.4
+sentence-transformers==2.2.2
+
+# Document Processing
+unstructured[local-inference]==0.18.20
+python-docx==1.2.0
+pypdf==6.3.0
+openpyxl==3.1.5
+Pillow==10.1.0
+
+# Web & HTTP
+requests==2.32.0
+beautifulsoup4==4.13.5
+urllib3==2.1.0
+
+# AI/ML Models
+google-generativeai==0.6.0
+scipy==1.11.4
+
+# Data Processing & Utilities
+numpy==1.24.0
+pandas==2.1.3
+scikit-learn==1.3.2
+
+# Web Scraping
+lxml==4.9.3
+
+# Werkzeug (for file handling)
+Werkzeug==2.3.7
+
+# Additional Utilities
+typing-extensions==4.8.0
+pydantic==2.5.0

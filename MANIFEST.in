@@ -1,0 +1,15 @@
+include README.md
+include LICENSE
+include requirements.txt
+include .gitignore
+
+recursive-include frontend *.py
+recursive-include backend *.py
+recursive-include static *
+recursive-include templates *
+
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *$py.class
+global-exclude .DS_Store
+global-exclude .env
